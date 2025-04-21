@@ -78,7 +78,7 @@ Place your Gmail and Calendar `credentials.json` file in the project root. Silvi
 
 ## 🧪 Run Silvie
 ```bash
-python silvie090.py
+python silvie100.py
 ```
 
 She will greet you, check the weather, maybe suggest music... or pull a tarot card. Her moods shift with the time of day, and she may surprise you with a gift.
