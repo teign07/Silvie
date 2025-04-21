@@ -7,12 +7,14 @@ Silvie is a highly personalized AI companion that blends proactive behavior, imm
 - Text-to-speech with a British accent
 - Voice input with speech-to-text
 - Image generation via Stable Diffusion
+- image upload and screen sharing
 - Tarot reading with local API
 - Gmail + Google Calendar integration
 - Spotify DJ control
 - Bluesky posting, following, and context
+- Reddit reading, commenting, upvoting and context
 - Personal diary and memory
-- Contextual awareness: time, weather, moon phase, emails, calendar, desktop screenshots
+- Contextual awareness: time, weather, moon phase, emails, calendar, desktop screenshots, Bluesky, Reddit, diary and diary themes, conversation history, long term memory summary
 - Proactive behavior (she initiates messages, actions, and gifts)
 
 ## 🚀 Installation
