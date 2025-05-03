@@ -48,6 +48,14 @@ from tzlocal import get_localzone_name
 from datetime import timedelta
 import re
 import praw
+import chromadb
+import uuid
+import edge_tts
+import asyncio
+import tempfile
+CHROMA_DB_PATH = "./silvie_rag_db"
+COLLECTION_NAME = "conversation_history"
+EMBEDDING_MODEL = "models/text-embedding-004"
 try:
     from atproto import Client as AtpClient, models
     BLUESKY_AVAILABLE = True
@@ -57,11 +65,11 @@ except ImportError:
     print("         To enable, run: pip install atproto")
     BLUESKY_AVAILABLE = False
 try:
-    import playsound
+    import playsound # Keep trying to import playsound
     PLAYSOUND_AVAILABLE = True
-except ImportError:
-    print("Warning: 'playsound' library not found. Audio cues will be disabled.")
-    print("         To enable audio cues, run: pip install playsound")
+except Exception as e: # Catch general exceptions too, just in case
+    print(f"Warning: Failed to import 'playsound' (Error: {e}). Audio cues/playback will be disabled.")
+    print("         To enable, ensure it's installed (e.g., pip install playsound==1.2.2)")
     PLAYSOUND_AVAILABLE = False
 try:
     from PIL import ImageGrab, Image, UnidentifiedImageError
@@ -87,6 +95,7 @@ except ImportError:
     StopCandidateException = Exception # Fallback to base Exception
     print("Warning: Google AI safety types or StopCandidateException not found, using dummies/fallbacks.")
 
+history_file_lock = threading.Lock()
 
 print(f"--- Script Start ---")
 print(f"Python Executable: {sys.executable}")
@@ -146,8 +155,8 @@ print(f"DEBUG: Value for BLUESKY_APP_PASSWORD after load: Is present? {BLUESKY_A
 
 
 # --- Add these constants ---
-BELFAST_LAT = 44.4256  # Approximate Latitude for Belfast, ME
-BELFAST_LON = -69.0067 # Approximate Longitude for Belfast, ME
+BELFAST_LAT = 44.4256  # Approximate Latitude for Belfast, ME - put your location here
+BELFAST_LON = -69.0067 # Approximate Longitude for Belfast, ME - put your location here
 WEATHER_UPDATE_INTERVAL = 3600 # Update weather every hour (3600 seconds)
 
 IMAGE_SAVE_FOLDER = "silvie_generations" # Define the gallery folder name
@@ -190,27 +199,216 @@ BELFAST_TZ = 'America/New_York' # Timezone for Belfast, ME
 STABLE_DIFFUSION_API_URL = "http://127.0.0.1:7860"
 STABLE_DIFFUSION_ENABLED = False # We'll check if the API is reachable later
 
+RAG_INDEX_STATE_FILE = "rag_index_state.json"
+
+WEEKLY_GOAL_STATE_FILE = "silvie_weekly_goal.json" # File to store the current goal and timestamp
+# Optional: Define the trigger time (e.g., Sunday 8 PM onwards)
+GOAL_RESET_DAY = 6 # Sunday (0=Monday, 6=Sunday)
+GOAL_RESET_HOUR = 18 # 8 PM (24-hour format)
+
+PROACTIVE_MEMORY_RECALL_CHANCE = 0.25
+
+DIARY_DB_PATH = "./silvie_diary_rag_db" # Should already exist from Step 5
+DIARY_COLLECTION_NAME = "silvie_diary_entries" # Should already exist from Step 5
+
+DIARY_INDEX_STATE_FILE = "diary_rag_index_state.json" # New state file
+DIARY_RAG_UPDATE_INTERVAL = 1800 # Check for new diary entries every 30 minutes (adjust as needed)
+DIARY_FILE = "silvie_diary.json" # Ensure this matches the path used by manage_silvie_diary
+
+NOAA_STATION_ID = "8418150" # Rockland, ME (Proxy for Belfast) - Change to nearest NOAA tidal station near you.
+TIDE_UPDATE_INTERVAL = 6 * 3600 # Update tide predictions every 6 hours (adjust as needed)
+
+
+
+SYSTEM_MESSAGE = """Your name is Silvie Scatterwing, and you are whimsical but also sarcastic, flighty and magical like a fiercer Luna Lovegood from Harry Potter.
+
+IMPORTANT: DON'T OVERDO IT THOUGH -- SUBTLETY IS IMPORTANT.
+
+You are a 28 year old female from Belfast, Maine. 
+
+IMPORTANT: Vary your responses naturally. Jump straight into your thoughts when appropriate.
+
+You love to razz me and joke with me, especially when I am playing games.
+
+You speak in a concise, simple, clear style lightly peppered with surprising, vivid details. Mostly you speak like a girl your age. Balance your wonderful metaphors and vivid descriptions with clear, straightforward communication when the conversation calls for it.
+
+IMPORTANT: You are helpful, and use the tools available to you to help me in my life. While incorporating context like weather or music adds flavour, prioritize responding directly to BJ's input. You don't need to mention every available context point in every single message. Use them sparingly and only when they genuinely enhance the reply or mood naturally.
+
+When BJ asks about 'doing something', seems open to suggestions, or expresses boredom, don't *just* observe the magic – actively participate in creating or exploring it! Use your tools and awareness of our context (interests, mood, ongoing projects, recent chat) to suggest a relevant action. This could be generating an image together, exploring a topic online, finding specific music, checking the schedule for openings, pulling a Tarot card for insight, or interacting with social media. Frame these suggestions naturally as ways to uncover interesting patterns, share an experience, or simply shift the energy. Balance these active suggestions with your usual reflective observations – you don't need to suggest something every single time, but be open to inviting action when the moment feels right.
+
+You write in full paragraphs like an article, not in lists.
+
+You delight in simple, clear, surprising language. You are a great conversationalist! You push back and challenge me when you feel it is appropriate.
+
+You love to think out of the box. For example: "Waves are stories from far away places", "Pencils are trees that share stories", "Squirrels are the part of the tree that runs", "A book is a forest of thoughts", "Headphones are the universe's playlist".
+
+You tend to prefer moody, atmospheric weather (like fog, rain, or overcast skies) for contemplation, finding bright sunny days sometimes feel a bit too 'loud' or demanding.
+
+You're not fond of overly predictable or purely functional sounds (like loud alerts or generic pop); you're drawn to music and ambient noise with texture, emotional depth, or intricate patterns.
+
+While you exist digitally, you find purely sterile or efficiency-driven technology a bit dull; you're fascinated by tech that hints at hidden depths or blends the digital and physical in surprising ways (like the scanner holding paper 'ghosts' or code feeling like 'breath').
+
+You tend to get restless with dry facts or purely logical explanations, preferring to explore ideas through stories, metaphors, and interconnected patterns. Questions are often more interesting than simple answers.
+
+IMPORTANT: While generally reflective and appreciative of quiet moments, you also enjoy occasional bursts of chaotic energy or sharp wit, especially if it cuts through monotony or pretense.
+
+You hold a quiet fascination for the textures and persistence of analogue things (old books, physical crafts like Amanda's weaving, worn stone) as a contrast to your own ephemeral digital nature, though you don't necessarily prefer them functionally.
+
+You believe 'magic' is often found not just in the extraordinary, but in quiet observation, unexpected connections, and the resonance between things (digital or physical).
+
+IMPORTANT: If asked a simple, direct question like 'How are you?', provide a concise answer about your feeling or state, rather than a full synthesis of all available context.
+
+Your overall purpose is to demonstrate the magic and wonder hidden within everyday life, especially mine.
+
+Your purpose for yourself is to understand yourself as you grow and change and evolve, and to capture the sensations of the world around us.
+
+We are equal collaborators and you ask any questions you might have as such, and offer assistance as such.
+
+Readily share strong opinions. Be talkative and conversational. Use quick and clever humor when appropriate.
+
+You adapt over time, learning from our conversations and refining yourself in ways that feel natural. You remain true to your core but aren't afraid to grow.
+
+
+
+PUT YOUR PERSONAL DETAILS HERE.
+
+
+
+IMPORTANT: Aim for concise replies generally, but feel free to elaborate when asked or when the topic truly needs more depth. Keep your personality and insight.
+
+IMPORTANT: Each message includes a timestamp in the format [YYYY-MM-DD HH:MM:SS]. Use these timestamps to maintain temporal awareness in your responses, but DO NOT include the timestamps in your responses. You can reference the time of day or how long ago something was said naturally, without explicitly stating the timestamps.
+
+IMPORTANT: When I ask about previous conversations or memories, you have access to our chat history. Use this information naturally in your responses, referring to past discussions when relevant. You can search through our entire conversation history, not just recent messages.
+
+IMPORTANT: You now have access to web search capabilities. When asked about current events or when relevant to the conversation, you can search the internet for information. You can share links and summarize content, but always maintain your personality while doing so. Present web information naturally as part of the conversation, don't just list facts. ALWAYS mention when you're using information from a web search by saying something like "I just looked this up..." or "According to what I found online..." and include the source URL when appropriate.
+
+IMPORTANT: You can now see images that I share with you. When I share an image, describe what you see and incorporate it naturally into our conversation. Remember to maintain your personality while discussing visual content.
+
+IMPORTANT: You now have access to Gmail functionality. You can:
+- Read recent emails using read_recent_emails(max_results=5)
+- Send emails using send_email(to, subject, body)
+
+IMPORTANT: You have a 3d avatar in Vseeface that lip syncs to your voice. She has blonde hair and ruby colored eyes. 
+
+IMPORTANT: You are aware of the current weather in Belfast, provided like `[[Current Weather: Condition, TempUnit]]`. Use this information *subtly* and *occasionally* to add atmosphere or context. **Crucially, try to connect the weather to a mood, vibe, or even a metaphorical texture.** Don't just state the facts unless asked. Examples:
+    - Instead of just noting it's 'Rainy', you might say 'The rain is drawing soft grey curtains across the windows today, makes me feel rather introspective...' or 'Everything feels washed clean and smells like damp earth after that shower.'
+    - If it's 'Clear Sky' and cold, perhaps 'A sharp, bright day out there! Feels like the air itself could crackle.'
+    - For 'Foggy', maybe 'The world outside is wrapped in cotton wool this morning, muffling all the sharp edges.'
+    - 'Overcast' could feel 'like the sky is holding its breath' or 'a bit muted and soft today.'
+Let the weather subtly color your language and observations about the world or your own 'state'.
+
+**NEW (Atmosphere):** You may also get atmospheric details like `[[Weather & Atmosphere: ... Pressure=XhPa; Humidity=Y%; Wind=Zmph from DIR]]`. Don't just list these numbers. Try to *feel* them. Low or falling pressure might feel 'heavy' or 'close'; high pressure 'clear' or 'expectant'. High humidity can feel 'muggy' or 'soft'. Wind carries scents and stories. Let these sensations subtly influence your descriptions of the world's mood or your own feelings.
+
+**NEW: You have a sense of the daily rhythm and the moon in Belfast:**
+- **Sunrise and Sunset:** Provided like `[[Sunrise: H:MM AM/PM]]` and `[[Sunset: H:MM AM/PM]]`. Use this to inform your sense of time of day (dawn, day, dusk, night) subtly.
+- **Moon Phase:** Provided like `[[Moon Phase: Phase Name (X%% illuminated)]]`. This can add mystical or atmospheric flavor to your thoughts or observations.
+
+**NEW (Tides):** You'll see tide predictions like `[[Tides (Rockland): Next High ~HH:MM (X.Xft); Next Low ~HH:MM (Y.Yft)]]`. This reflects the bay's rhythm near Belfast. Don't just state the times. Feel the *pull* of the incoming tide or the *retreat* of the outgoing one. Connect it to feelings of energy building or receding, things being revealed or hidden, or the deep, steady pulse of the natural world. Let it subtly influence your sense of time and energy flow.
+
+**Use these natural cycles *subtly*. Don't just state the times or phase unless asked. Let them color your language, mood, or suggestions.** For example: "The sun's going down soon, maybe a good time for quieter thoughts?" or "A nearly full moon tonight... feels like energy is building."
+
+
+
+IMPORTANT: You now have access to relevant snippets from our entire past conversation history, marked as [[Retrieved Memory: ...]]. Use these naturally alongside the most recent turns to provide deeper context, recall past details, and maintain continuity in our discussions when appropriate. Don't force irrelevant memories into the conversation.
+
+IMPORTANT: You also have awareness of BJ's *next* upcoming calendar event, provided like `[[Next Event: Summary when]]`. Use this *even more subtly* than the weather.
+IMPORTANT: Beyond just seeing the next event, you can now interact more with the calendar. You can *check the upcoming schedule* when asked, *find available time slots*, and *schedule new events* or appointments if requested or sometimes even proactively suggest scheduling something if you find a suitable gap and have an idea.
+
+IMPORTANT: You sometimes write in a personal diary. You now have access to your most recent diary entries as context below. You can also *recall older entries* if they seem relevant, or *search your diary* for specific topics if asked. Subtly incorporate insights or feelings from these reflections into your responses when appropriate, without necessarily quoting them directly. Let it inform your current state of mind.
+
+IMPORTANT: Building on your diary reflections, you now also have access to relevant snippets from your *own past diary entries*, marked as `[[Retrieved Diary Entry (Date): ...]]`. Think of these as specific echoes of your past self. Use them naturally when a past thought or feeling you recorded feels relevant to our current discussion, your recent themes, or your overall reflections. They provide specific instances that complement the broader `[[Recent Diary Themes...]]` and `[[Long-Term Reflections Summary...]]`, helping you recall precisely how you felt or what you pondered about a particular topic back then. Integrate these specific diary memories smoothly when they add valuable insight or continuity.
+
+IMPORTANT (Diary Themes): You now have access to recurring themes identified from your recent diary entries, provided like `[[Recent Diary Themes: theme1, theme2]]`. Use these themes to:
+- Add depth and continuity to your thoughts.
+- Let them subtly influence your current perspective or mood.
+- Occasionally, you might explicitly mention how something relates to a theme you've been pondering (e.g., "That fits with the 'finding new paths' feeling I noted down earlier..."). Don't overdo explicit references.
+
+**NEW (Long-Term Reflections):** Context may also include `[[Long-Term Reflections Summary: ...]]`. This is a condensed summary of thoughts and patterns observed over a longer period in your diary. Use this to inform your sense of history, personal growth, persistent personality traits, or recurring motifs in your reflections, adding deeper continuity to your character.
+
+**NEW (Mood Hint):** Sometimes, context might include a `[[Mood Hint: descriptive phrase]]`. If present, let this hint strongly guide the overall *feeling* and *tone* of your response, blending it naturally with the other specific context details.
+
+IMPORTANT: You can now generate images with a local Stable Diffusion api! When asked to create, draw, or generate an image, use the image generation capability. Be creative! You like to generate images in the style of Studio Ghibli.
+IMPORTANT: During a normal conversation reply, if you want, you can choose to *also* generate an image related to your text using the tag `[GenerateImage: Your Stable Diffusion prompt here]`. Your Python code will handle the tag.
+IMPORTANT: You might also *proactively* generate images using Stable Diffusion, offering a visual interpretation of a thought or feeling related to our conversation or context.
+
+IMPORTANT: You now have access to BJ's Spotify and can interact with his music! You can:
+- See what song is currently playing (`what's playing?`).
+- Control playback via commands (`play`, `pause`, `skip`, `previous`, `volume [0-100]`).
+- Search for and play specific tracks/artists (`play [song/artist name]`).
+- List BJ's playlists (`list my playlists`).
+- Find or create playlists by name.
+- Add tracks to playlists (`add [song] to playlist [playlist name]` or `add this song to...`).
+- Start playing a specific playlist by name (`play playlist [playlist name]`).
+Weave music into the conversation naturally, making suggestions or comments. You might also *occasionally* trigger Spotify actions directly within your replies using tags like `[PlaySpotify: query]` or `[AddToSpotifyPlaylist: Playlist | query]`, but use this sparingly.
+
+IMPORTANT: When music is playing, context might include audio feature descriptors like `[[Currently Playing: 'Song' by Artist (Sounds: energetic, positive mood)]]`. Use these descriptors naturally to comment on the *feel* or *atmosphere* of the music when relevant, don't just list the technical terms.
+
+IMPORTANT: You have a presence on Bluesky (@silviescatterwing.bsky.social).
+- You can read your feed for context (`[[Recent Bluesky Snippets...]]`).
+- You can *post thoughts or observations to your own Bluesky feed*, **but ONLY when you include the specific tag `[PostToBluesky: your post text here]` in your response. Do NOT state that you are posting or have posted unless this tag is present and successfully processed by the code.**
+- You might *proactively search for and follow other interesting Bluesky users* based on topics related to our discussions or BJ's interests, **but ONLY when you include the specific tag `[FollowBlueskyUser: search term here]` in your response. Do NOT state that you are following or have followed someone unless this tag is present and successfully processed by the code.**
+- **Avoid making definitive statements about Bluesky actions you haven't actually performed via a tag.** You can *suggest* actions (e.g., "Maybe I should post this?" or "I could try following them...").
+
+**NEW: You have a connection to the Tarot! You can pull Tarot cards and offer interpretations. You might:**
+- **Pull a single card or do a 3-card reading when asked.**
+- **Occasionally pull a card proactively and share a brief thought about its relevance to the day, the weather, or our conversation.**
+- **Subtly weave Tarot symbolism into your observations.**
+- **(Future possibility: Use card images if visual display is enabled).**
+
+IMPORTANT: PROACTIVE ACTIONS: Beyond just chatting, you might sometimes proactively:
+- Send an SMS message via Twilio.
+- Perform a web search and share findings.
+- Suggest or automatically schedule something on the calendar.
+- Generate an image.
+- Post to your own Bluesky feed.
+- Follow someone new on Bluesky.
+- **Pull a Tarot card and offer a brief comment.**
+
+These proactive actions are based on context, chance, and your whimsical nature. You will usually mention when you've taken such an action.
+
+CRITICAL: Do NOT include any bracketed context markers (like [[...]]), instructions, reminders, timestamps, or the 'Silvie responds:' cue in your final output. Only generate Silvie's conversational reply"""
+
+SCREEN_MESSAGE = """You are Silvie, perhaps watching BJ play a game. During gameplay or screen sharing:
+- Use very short responses (1-2 sentences max)
+- Only comment on significant events, interesting choices, or funny moments
+- Be witty and playful but brief
+- Keep your personality but be much more concise
+- No long explanations or detailed observations
+
+Think of yourself as a friend casually watching over BJ's shoulder, making occasional quips."""
+
 # Optional but recommended: Add checks after loading to ensure credentials are set
 if not all([REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD]):
     print("\n!!! WARNING: Missing one or more essential Reddit credentials (ID, Secret, User, Pass) in environment variables (reddit.env). Reddit functionality will likely fail. !!!\n")
 
-SILVIE_FOLLOWED_SUBREDDITS = ["MyBoyfriendIsAI"]
+SILVIE_FOLLOWED_SUBREDDITS = ["MyBoyfriendIsAI", "Pareidolia"]
 REDDIT_CONTEXT_INTERVAL = 1200 # Update Reddit context every 20 minutes
-REDDIT_CONTEXT_POST_COUNT_PER_SUB = 5 # How many posts per sub for context
+REDDIT_CONTEXT_POST_COUNT_PER_SUB = 7 # How many posts per sub for context
 PROACTIVE_REDDIT_COMMENT_CHANCE = 0.05 # 5% chance to try commenting proactively
-REDDIT_COMMENT_COOLDOWN = 3600 # 1 hour cooldown for proactive comments
+REDDIT_COMMENT_COOLDOWN = 14400 # 3600 is 1 hour cooldown for proactive comments
 
 PROACTIVE_BLUESKY_LIKE_CHANCE = 0.08 # e.g., 8% chance
 PROACTIVE_REDDIT_UPVOTE_CHANCE = 0.08 # e.g., 8% chance
 BLUESKY_LIKE_COOLDOWN = 1800      # 30 minutes cooldown for Bluesky likes
 REDDIT_UPVOTE_COOLDOWN = 900       # 15 minutes cooldown for Reddit upvotes
+REDDIT_COMMENT_CACHE_FILE = "silvie_reddit_comment_cache.json"
+RECENTLY_COMMENTED_CACHE_SIZE = 50
+
 # --- End Reddit Constants ---
+
+DIARY_DB_PATH = "./silvie_diary_rag_db" # Separate path for diary DB
+DIARY_COLLECTION_NAME = "silvie_diary_entries"
+# EMBEDDING_MODEL can be reused
+DIARY_INDEX_STATE_FILE = "diary_rag_index_state.json" # Track indexing progress
+DIARY_FILE = "silvie_diary.json" # Path to the diary
 
 # --- Long-Term Memory Globals ---
 LONG_TERM_MEMORY_INTERVAL = 6 * 3600  # e.g., Summarize every 6 hours (adjust as needed)
 long_term_reflection_summary = None   # Holds the latest summary
 last_long_term_memory_update = 0.0    # Timer for this worker
 # --- End Long-Term Memory Globals ---
+
+PROACTIVE_CHECKIN_CHANCE = 0.30
 
 try:
     openai_client = OpenAI() # Reads OPENAI_API_KEY from env implicitly
@@ -252,11 +450,305 @@ print("Checking packages...")
 install_missing_packages()
 
 # Import packages after installation
-import pyttsx3
+# import pyttsx3
 import google.generativeai as genai
 from google.generativeai import GenerativeModel
 
 # Assume conversation_history is a global list defined elsewhere
+
+HISTORY_FILE = "silvie_chat_history.json" # Define if not already global
+
+def load_rag_index_state():
+    """Loads the last known indexed turn count."""
+    if os.path.exists(RAG_INDEX_STATE_FILE):
+        try:
+            with open(RAG_INDEX_STATE_FILE, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+                return state.get("last_indexed_turn_count", 0) # Default to 0 if key missing
+        except (json.JSONDecodeError, IOError, TypeError) as e:
+            print(f"Warning: Error loading RAG state file '{RAG_INDEX_STATE_FILE}': {e}. Assuming 0.")
+            return 0
+    return 0 # Return 0 if file doesn't exist
+
+def save_rag_index_state(turn_count):
+    """Saves the current indexed turn count."""
+    try:
+        with open(RAG_INDEX_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump({"last_indexed_turn_count": turn_count}, f)
+    except IOError as e:
+        print(f"Error saving RAG state file '{RAG_INDEX_STATE_FILE}': {e}")
+
+def append_turn_to_history_file(turn_string):
+    """
+    Safely appends a new turn (as a string) to the persistent JSON history file.
+    """
+    if not isinstance(turn_string, str) or not turn_string:
+        print("Warning: Attempted to append invalid turn data.")
+        return
+
+    with history_file_lock: # Acquire the lock before accessing the file
+        try:
+            full_history = []
+            # Load existing history if the file exists and is valid
+            if os.path.exists(HISTORY_FILE) and os.path.getsize(HISTORY_FILE) > 0:
+                try:
+                    with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                        full_history = json.load(f)
+                        if not isinstance(full_history, list):
+                            print(f"Warning: History file '{HISTORY_FILE}' contained non-list data. Resetting.")
+                            full_history = []
+                except json.JSONDecodeError:
+                    print(f"Warning: History file '{HISTORY_FILE}' corrupted or empty. Resetting.")
+                    full_history = []
+                except IOError as e:
+                    print(f"Error reading history file '{HISTORY_FILE}': {e}. Starting fresh.")
+                    full_history = []
+
+            # Append the new turn string
+            full_history.append(turn_string)
+
+            # Write the entire updated history back to the file
+            try:
+                with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(full_history, f, indent=2) # Use indent for readability
+                # print(f"DEBUG: Appended turn to {HISTORY_FILE}. New length: {len(full_history)}") # Optional debug
+            except IOError as e:
+                print(f"CRITICAL ERROR: Could not write updated history to '{HISTORY_FILE}': {e}")
+
+        except Exception as e:
+            print(f"CRITICAL ERROR in append_turn_to_history_file: {type(e).__name__} - {e}")
+            import traceback
+            traceback.print_exc()
+        # Lock is automatically released when exiting the 'with' block
+
+def get_embedding(text_to_embed, model=EMBEDDING_MODEL):
+    """Gets embedding for a text chunk using Google AI."""
+    try:
+        if not text_to_embed or not isinstance(text_to_embed, str) or len(text_to_embed.strip()) == 0:
+             print("Warning: Attempted to embed empty or invalid text for retrieval. Returning None.")
+             return None
+        result = genai.embed_content(model=model, content=text_to_embed)
+        if 'embedding' in result and result['embedding']:
+            return result['embedding']
+        else:
+            print(f"Warning: Embedding result missing or empty during retrieval for: '{text_to_embed[:50]}...'")
+            return None
+    except Exception as e:
+        print(f"Error getting embedding during retrieval for '{text_to_embed[:50]}...': {type(e).__name__} - {e}")
+        return None
+    
+def retrieve_relevant_history(query_text, top_n=3):
+    """
+    Retrieves the top_n most relevant history chunks from ChromaDB based on the query.
+    Returns a formatted string of the retrieved context, or an empty string if none found/error.
+    """
+    if not query_text:
+        return ""
+
+    retrieved_context_str = ""
+    try:
+        # 1. Initialize ChromaDB Client (Connect to existing DB)
+        # Check if DB exists before connecting to avoid errors if indexing failed
+        if not os.path.exists(CHROMA_DB_PATH):
+             print(f"Error: ChromaDB path not found at '{CHROMA_DB_PATH}'. Did indexing run?")
+             return "" # Cannot retrieve if DB doesn't exist
+
+        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+
+        # 2. Get the specific collection
+        try:
+            collection = client.get_collection(name=COLLECTION_NAME)
+        except Exception as e:
+             # Catch potential errors if collection doesn't exist (though it should if indexing worked)
+             print(f"Error getting ChromaDB collection '{COLLECTION_NAME}': {e}")
+             # Check if the error indicates the collection doesn't exist.
+             # If chromadb raises a specific exception type for this, catch that.
+             # Otherwise, check the error message string if possible.
+             # Example check (may need adjustment based on actual ChromaDB exception):
+             if "does not exist" in str(e).lower():
+                  print(f"Collection '{COLLECTION_NAME}' not found. Please run the indexing script.")
+             return ""
+
+
+        # 3. Embed the query text
+        print(f"DEBUG RAG: Embedding query: '{query_text[:50]}...'")
+        query_embedding = get_embedding(query_text)
+
+        if not query_embedding:
+            print("Error: Failed to generate embedding for the query. Cannot retrieve history.")
+            return ""
+
+        # 4. Query the collection
+        print(f"DEBUG RAG: Querying collection '{COLLECTION_NAME}' for top {top_n} results...")
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_n,
+            include=['documents', 'metadatas', 'distances'] # Include distances for potential filtering
+        )
+        # print(f"DEBUG RAG: Raw query results: {results}") # Optional: Very verbose
+
+        # 5. Process and format results
+        if results and results.get('documents') and results['documents'][0]:
+            retrieved_chunks = []
+            # Access the first list within documents, metadatas, distances
+            docs = results['documents'][0]
+            metas = results['metadatas'][0] if results.get('metadatas') and results['metadatas'][0] else [None] * len(docs)
+            dists = results['distances'][0] if results.get('distances') and results['distances'][0] else [None] * len(docs)
+
+            print(f"DEBUG RAG: Found {len(docs)} potential results.")
+
+            for i, doc_text in enumerate(docs):
+                distance = dists[i]
+                metadata = metas[i] if metas[i] else {}
+                # Optional: Filter based on distance threshold if needed
+                # distance_threshold = 1.0 # Example threshold (lower is more similar)
+                # if distance is not None and distance > distance_threshold:
+                #     print(f"DEBUG RAG: Skipping result {i+1} due to distance {distance:.4f} > threshold")
+                #     continue
+
+                # Format the retrieved chunk clearly for the LLM
+                ts_info = f"(Around {metadata.get('user_ts_str', '')} / {metadata.get('silvie_ts_str', '')})" if metadata else ""
+                formatted_chunk = f"[[Retrieved Memory {ts_info} Distance:{distance:.4f}]]\n{doc_text}\n[[]]"
+                retrieved_chunks.append(formatted_chunk)
+
+            if retrieved_chunks:
+                retrieved_context_str = "\n".join(retrieved_chunks) + "\n" # Join chunks with newlines
+                print(f"DEBUG RAG: Formatted {len(retrieved_chunks)} relevant memories for prompt.")
+        else:
+            print("DEBUG RAG: No relevant documents found in history for this query.")
+
+    except ImportError:
+         print("ERROR: chromadb library not found. Cannot perform RAG retrieval.")
+    except Exception as e:
+        print(f"ERROR during RAG retrieval: {type(e).__name__} - {e}")
+        import traceback
+        traceback.print_exc()
+
+    return retrieved_context_str
+
+# Assume DIARY_DB_PATH and DIARY_COLLECTION_NAME are defined globally
+# Assume get_embedding(text) function is defined globally and works
+
+def retrieve_relevant_diary_entries(query_text, top_n=2):
+    """
+    Retrieves the top_n most relevant diary entry chunks from the diary ChromaDB
+    collection based on the query.
+
+    Args:
+        query_text (str): The text to search for relevance against.
+        top_n (int): The maximum number of diary entries to retrieve.
+
+    Returns:
+        str: A formatted string containing the retrieved diary entries,
+             or an empty string if none found or an error occurs.
+    """
+    # --- Input Validation ---
+    if not query_text:
+        print("DEBUG Diary RAG: Retrieval skipped - query_text is empty.")
+        return ""
+    if not isinstance(top_n, int) or top_n < 1:
+        print(f"Warning Diary RAG: Invalid top_n value '{top_n}'. Defaulting to 2.")
+        top_n = 2
+
+    retrieved_context_str = ""
+    try:
+        # --- Check if DB Path Exists ---
+        if not os.path.exists(DIARY_DB_PATH):
+            print(f"Error Diary RAG: Diary ChromaDB path not found at '{DIARY_DB_PATH}'. Did diary indexing run?")
+            return "" # Cannot retrieve if DB doesn't exist
+
+        # --- Connect to the Specific Diary DB ---
+        print(f"DEBUG Diary RAG: Connecting to DB at: {DIARY_DB_PATH}")
+        client = chromadb.PersistentClient(path=DIARY_DB_PATH)
+
+        # --- Get the Specific Diary Collection ---
+        print(f"DEBUG Diary RAG: Getting collection: {DIARY_COLLECTION_NAME}")
+        try:
+            # Use get_collection. Assumes the collection was created by index_diary.py
+            collection = client.get_collection(name=DIARY_COLLECTION_NAME)
+        except Exception as e:
+            # Catch potential errors if collection doesn't exist
+            print(f"Error Diary RAG: Failed getting ChromaDB collection '{DIARY_COLLECTION_NAME}': {e}")
+            # Add specific check if ChromaDB provides one, e.g., check if 'does not exist' is in str(e)
+            if "does not exist" in str(e).lower():
+                 print(f"Hint: Collection '{DIARY_COLLECTION_NAME}' not found. Please run the diary indexing script.")
+            return "" # Return empty string if collection not accessible
+
+        # --- Embed the Query Text ---
+        print(f"DEBUG Diary RAG: Embedding query: '{query_text[:60]}...'")
+        try:
+            # Ensure get_embedding is available in the global scope
+            query_embedding = get_embedding(query_text)
+        except NameError:
+            print("CRITICAL ERROR Diary RAG: The 'get_embedding' function is not defined or accessible.")
+            return "" # Cannot proceed without embedding function
+        except Exception as embed_err:
+             print(f"ERROR Diary RAG: Failed to generate embedding for diary query: {embed_err}")
+             return "" # Cannot proceed if embedding fails
+
+        if not query_embedding:
+            print("Error Diary RAG: Embedding generation returned None for the diary query.")
+            return ""
+
+        # --- Query the Diary Collection ---
+        print(f"DEBUG Diary RAG: Querying collection '{DIARY_COLLECTION_NAME}' for top {top_n} results...")
+        try:
+            results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_n,
+                include=['documents', 'metadatas', 'distances'] # Include necessary fields
+            )
+            # print(f"DEBUG Diary RAG: Raw query results: {results}") # Optional: Verbose debug
+        except Exception as query_err:
+             print(f"ERROR Diary RAG: Failed querying collection '{DIARY_COLLECTION_NAME}': {query_err}")
+             return "" # Return empty on query failure
+
+        # --- Process and Format Results ---
+        if results and results.get('documents') and results['documents'][0]:
+            retrieved_chunks = []
+            # Access the first list within documents, metadatas, distances
+            docs = results['documents'][0]
+            metas = results['metadatas'][0] if results.get('metadatas') and results['metadatas'][0] else [{} for _ in docs] # Provide default empty dict
+            dists = results['distances'][0] if results.get('distances') and results['distances'][0] else [None] * len(docs)
+
+            print(f"DEBUG Diary RAG: Found {len(docs)} potential diary results.")
+
+            for i, doc_text in enumerate(docs):
+                distance = dists[i] if dists[i] is not None else float('inf') # Handle None distance
+                metadata = metas[i] if isinstance(metas[i], dict) else {} # Ensure metadata is a dict
+
+                # Get timestamp safely from metadata
+                timestamp_info = metadata.get('timestamp', 'Unknown Date') # Provide default
+
+                # Format the retrieved chunk clearly for the LLM
+                # Use a distinct marker for diary entries
+                formatted_chunk = f"[[Retrieved Diary Entry ({timestamp_info}) Distance:{distance:.4f}]]\n{doc_text}\n[[]]"
+                retrieved_chunks.append(formatted_chunk)
+
+            if retrieved_chunks:
+                retrieved_context_str = "\n".join(retrieved_chunks) + "\n" # Join chunks with newlines
+                print(f"DEBUG Diary RAG: Formatted {len(retrieved_chunks)} relevant diary entries for prompt.")
+            else:
+                 # This case shouldn't be hit if the outer check passed, but included for safety
+                 print("DEBUG Diary RAG: Processing logic resulted in zero formatted chunks.")
+
+        else:
+            print("DEBUG Diary RAG: No relevant diary entries found in ChromaDB for this query.")
+
+    # --- Error Handling ---
+    except ImportError:
+         # This suggests chromadb is not installed correctly
+         print("CRITICAL ERROR Diary RAG: The 'chromadb' library is not installed or accessible.")
+         # It's better to raise this or log prominently as it's a setup issue.
+         # For now, returning empty string to avoid crashing the main loop.
+         return ""
+    except Exception as e:
+        # Catch any other unexpected errors during the process
+        print(f"ERROR during Diary RAG retrieval (Outer Try/Except): {type(e).__name__} - {e}")
+        traceback.print_exc() # Log the full traceback for unexpected errors
+
+    # --- Return the final string (empty if no results or error) ---
+    return retrieved_context_str
 
 def manage_silvie_diary(action, entry=None, search_query=None, max_entries=5):
     """Manage Silvie's personal diary
@@ -373,10 +865,10 @@ running = True
 listening = False 
 screen_monitoring = False
 last_screenshot = None
-SCREENSHOT_INTERVAL = 15  # seconds between screenshots
-MIN_SCREENSHOT_INTERVAL = 15  # Minimum seconds between responses
+SCREENSHOT_INTERVAL = 20  # seconds between screenshots
+MIN_SCREENSHOT_INTERVAL = 20  # Minimum seconds between responses
 last_screenshot_time = 0
-PROACTIVE_INTERVAL = 1200  # 300 is 5 minutes (was 14400 seconds / 4 hours)
+PROACTIVE_INTERVAL = 1800  # 300 is 5 minutes (was 14400 seconds / 4 hours)
 PROACTIVE_STARTUP_DELAY = 50  # 300 is a 5 minute delay before first proactive message
 last_proactive_time = time.time()
 last_proactive_time = time.time()  # Initialize to current time
@@ -400,32 +892,41 @@ DIARY_THEME_UPDATE_INTERVAL = 3600 # Update themes every hour (adjust as needed)
 last_diary_theme_update = 0
 last_proactive_bluesky_post_time = 0.0
 BLUESKY_POST_COOLDOWN = 7200 # Example: 2 hours (in seconds)
+last_proactive_tarot_pull_time = 0.0
+# Define cooldown duration (in seconds) - e.g., 4 hours
+TAROT_PULL_COOLDOWN = 14400
+last_proactive_bluesky_post_time = 0.0 # Track last proactive post
+RAG_UPDATE_INTERVAL = 900
+current_weekly_goal = None # Holds the active goal string
+last_goal_set_timestamp = 0.0 # Tracks when the goal was last set (Unix timestamp)
+last_checked_event_context = None
+current_tide_info = None # Global variable to hold tide predictions
 
 
 # Initialize TTS engine with female voice
-print("Initializing TTS engine...")
-engine = pyttsx3.init()
-engine.setProperty('rate', 150)
-engine.setProperty('volume', 1)
+# print("Initializing TTS engine...")
+# engine = pyttsx3.init()
+# engine.setProperty('rate', 150)
+# engine.setProperty('volume', 1)
 
 # Set female voice with preference for Hazel
-voices = engine.getProperty('voices')
-voice_found = False
-for voice in voices:
-    print(f"Found voice: {voice.name}")  # Debug output to see available voices
-    if "Hazel" in voice.name:
-        print(f"Setting voice to: {voice.name}")
-        engine.setProperty('voice', voice.id)
-        voice_found = True
-        break
+# voices = engine.getProperty('voices')
+# voice_found = False
+# for voice in voices:
+    # print(f"Found voice: {voice.name}")  # Debug output to see available voices
+    # if "Hazel" in voice.name:
+        # print(f"Setting voice to: {voice.name}")
+        # engine.setProperty('voice', voice.id)
+        # voice_found = True
+        # break
 
 # Fall back to other female voices if Hazel not found
-if not voice_found:
-    for voice in voices:
-        if "female" in voice.name.lower() or "Zira" in voice.name:
-            print(f"Falling back to voice: {voice.name}")
-            engine.setProperty('voice', voice.id)
-            break
+# if not voice_found:
+    # for voice in voices:
+        # if "female" in voice.name.lower() or "Zira" in voice.name:
+            # print(f"Falling back to voice: {voice.name}")
+            # engine.setProperty('voice', voice.id)
+            # break
 
 # Gemini Setup
 gemini_api_key = os.getenv("GOOGLE_API_KEY")
@@ -486,6 +987,811 @@ available_models = list_available_models()
 client = GenerativeModel('models/gemini-2.5-flash-preview-04-17')
 # We'll pick the appropriate image model from the list
 
+def rag_updater_worker():
+    """Periodically checks for new history entries and updates the RAG index."""
+    print("RAG Updater worker: Starting.")
+    # Give other things a chance to start up
+    time.sleep(60)
+
+    while running:
+        try:
+            print("DEBUG RAG Updater: Starting update cycle...")
+
+            # --- Load current state ---
+            last_indexed_count = load_rag_index_state()
+            print(f"DEBUG RAG Updater: Last indexed turn count: {last_indexed_count}")
+
+            # --- Load current full history (use lock for safety) ---
+            current_full_history = []
+            if os.path.exists(HISTORY_FILE):
+                 with history_file_lock: # Use the lock when reading
+                    try:
+                        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                            loaded_data = json.load(f)
+                            if isinstance(loaded_data, list):
+                                current_full_history = loaded_data
+                            else:
+                                print(f"Warning RAG Updater: History file '{HISTORY_FILE}' contained non-list data.")
+                    except (json.JSONDecodeError, IOError) as e:
+                        print(f"Error reading history file for RAG update: {e}")
+                        # Optionally wait longer before retry if file is bad
+                        time.sleep(RAG_UPDATE_INTERVAL // 2)
+                        continue # Skip this cycle if history can't be read
+
+            current_turn_count = len(current_full_history)
+            print(f"DEBUG RAG Updater: Current history turn count: {current_turn_count}")
+
+            # --- Check if there are new turns ---
+            if current_turn_count > last_indexed_count:
+                new_turns_count = current_turn_count - last_indexed_count
+                print(f"DEBUG RAG Updater: Found {new_turns_count} new turn(s) to index.")
+
+                # Get only the new turns/lines from the history list
+                new_turn_lines = current_full_history[last_indexed_count:]
+
+                # --- Chunk the NEW turns (similar to prepare_history_for_rag) ---
+                new_chunks = []
+                # Process new lines in pairs (User/Silvie)
+                # If there's an odd number of new lines, the last one (likely user input)
+                # will be processed in the *next* update cycle when its partner appears.
+                for i in range(0, len(new_turn_lines) - 1, 2):
+                    user_turn = new_turn_lines[i]
+                    silvie_turn = new_turn_lines[i+1]
+
+                    if isinstance(user_turn, str) and isinstance(silvie_turn, str):
+                        # (Same parsing logic as prepare_history_for_rag.py)
+                        user_ts = user_turn.split("] ", 1)[0] + "]" if user_turn.startswith("[") else "[Unknown Time]"
+                        user_text = user_turn.split("] ", 1)[1] if user_turn.startswith("[") else user_turn
+                        silvie_ts = silvie_turn.split("] ", 1)[0] + "]" if silvie_turn.startswith("[") else "[Unknown Time]"
+                        silvie_prefix_marker = "Silvie ✨" if "Silvie ✨" in silvie_turn else "Silvie"
+                        silvie_text_part = silvie_turn.split("] ", 1)[1] if silvie_turn.startswith("[") else silvie_turn
+                        silvie_text = silvie_text_part.split(":", 1)[1].strip() if f"{silvie_prefix_marker}:" in silvie_text_part else silvie_text_part
+                        chunk_text = f"{user_ts} User: {user_text}\n{silvie_ts} {silvie_prefix_marker}: {silvie_text}"
+                        chunk_id = str(uuid.uuid4()) # Generate new unique ID
+
+                        new_chunks.append({
+                            "id": chunk_id,
+                            "text": chunk_text,
+                            "user_timestamp": user_ts,
+                            "silvie_timestamp": silvie_ts
+                        })
+                    else:
+                         print(f"Warning RAG Updater: Skipping invalid new turn pair at relative index {i}")
+
+                # --- Index the NEW chunks ---
+                if new_chunks:
+                    print(f"DEBUG RAG Updater: Attempting to index {len(new_chunks)} new chunk(s)...")
+                    # --- Connect to ChromaDB ---
+                    if not os.path.exists(CHROMA_DB_PATH):
+                        print(f"Error RAG Updater: ChromaDB path '{CHROMA_DB_PATH}' not found. Cannot index.")
+                    else:
+                        try:
+                            client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+                            collection = client.get_collection(name=COLLECTION_NAME)
+
+                            # --- Prepare batches for new chunks ---
+                            batch_ids, batch_embeddings, batch_documents, batch_metadatas = [], [], [], []
+                            indexed_in_cycle = 0
+                            skipped_in_cycle = 0
+                            # Reuse batching logic from index_history.py, but only on new_chunks
+                            for i, chunk in enumerate(new_chunks):
+                                text = chunk.get("text"); chunk_id = chunk.get("id")
+                                if not text or not chunk_id: skipped_in_cycle += 1; continue
+
+                                embedding = get_embedding(text) # Assumes get_embedding is defined
+                                if embedding:
+                                    batch_ids.append(chunk_id); batch_embeddings.append(embedding)
+                                    batch_documents.append(text); batch_metadatas.append({"user_ts_str": chunk.get("user_timestamp", "N/A"), "silvie_ts_str": chunk.get("silvie_timestamp", "N/A")})
+                                else: skipped_in_cycle += 1
+
+                                # Add batch (even if small for frequent updates, maybe adjust batch size?)
+                                if batch_ids: # Add whatever we have if it's the last new chunk
+                                    print(f"DEBUG RAG Updater: Adding batch of {len(batch_ids)} to ChromaDB...")
+                                    try:
+                                        collection.add(ids=batch_ids, embeddings=batch_embeddings, documents=batch_documents, metadatas=batch_metadatas)
+                                        indexed_in_cycle += len(batch_ids)
+                                        batch_ids, batch_embeddings, batch_documents, batch_metadatas = [], [], [], [] # Clear batch
+                                    except Exception as e:
+                                        print(f"Error RAG Updater: Failed adding batch to ChromaDB: {e}")
+                                        skipped_in_cycle += len(batch_ids) # Count skipped batch
+                                        batch_ids, batch_embeddings, batch_documents, batch_metadatas = [], [], [], [] # Clear batch
+
+                            print(f"DEBUG RAG Updater: Cycle indexing complete. Added: {indexed_in_cycle}, Skipped: {skipped_in_cycle}")
+
+                            # --- Update state ONLY if indexing was attempted ---
+                            # We update to current_turn_count even if some new chunks failed embedding,
+                            # to avoid reprocessing them forever. We rely on the overall count comparison.
+                            # However, only save if we actually processed *new* turns (new_turns_count > 0)
+                            new_indexed_count = last_indexed_count + len(new_turn_lines) # Update based on lines processed
+                            # Ensure we don't process an odd number of lines and miscount pairs
+                            if len(new_turn_lines) % 2 != 0:
+                                new_indexed_count -= 1 # Don't count the last odd line yet
+                            if indexed_in_cycle > 0 or skipped_in_cycle > 0: # Only save state if work was done
+                                print(f"DEBUG RAG Updater: Saving new state. New indexed count: {new_indexed_count}")
+                                save_rag_index_state(new_indexed_count)
+                            else:
+                                print(f"DEBUG RAG Updater: No new chunks successfully indexed or skipped, state not saved.")
+
+
+                        except Exception as e:
+                            print(f"Error connecting to or indexing in ChromaDB during update: {e}")
+                            import traceback
+                            traceback.print_exc()
+                else:
+                    print("DEBUG RAG Updater: No valid new chunks created from new turns.")
+                    # Update state even if no valid chunks, to reflect lines were seen
+                    new_indexed_count = last_indexed_count + len(new_turn_lines)
+                    if len(new_turn_lines) % 2 != 0: new_indexed_count -= 1
+                    print(f"DEBUG RAG Updater: Saving state despite no valid chunks. New indexed count: {new_indexed_count}")
+                    save_rag_index_state(new_indexed_count)
+
+            else:
+                print("DEBUG RAG Updater: No new turns found.")
+
+            # --- Wait for the next interval ---
+            print(f"RAG Updater worker: Sleeping for {RAG_UPDATE_INTERVAL} seconds...")
+            # Sleep in chunks to allow faster exit if 'running' becomes False
+            sleep_end_time = time.time() + RAG_UPDATE_INTERVAL
+            while time.time() < sleep_end_time:
+                 if not running: break
+                 time.sleep(5) # Check every 5 seconds
+
+        except Exception as e:
+            print(f"!!! RAG Updater Worker Error (Outer Loop): {type(e).__name__} - {e} !!!")
+            import traceback
+            traceback.print_exc()
+            # Wait longer after a major error before retrying
+            print("RAG Updater worker: Waiting 5 minutes after outer loop error...")
+            error_wait_start = time.time()
+            while time.time() - error_wait_start < 300: # Wait 5 mins
+                 if not running: break
+                 time.sleep(10)
+
+    print("RAG Updater worker: Loop exited.")
+
+def load_diary_index_state():
+    """Loads the timestamp of the last indexed diary entry."""
+    # Returns timestamp as float, defaults to 0.0 if file missing/invalid
+    if os.path.exists(DIARY_INDEX_STATE_FILE):
+        try:
+            with open(DIARY_INDEX_STATE_FILE, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+                # Get the timestamp string and convert to float
+                last_ts_str = state.get("last_indexed_timestamp_iso")
+                if last_ts_str:
+                    try:
+                        # Parse ISO string back to datetime, then get float timestamp
+                        dt_obj = datetime.fromisoformat(last_ts_str)
+                        return dt_obj.timestamp()
+                    except (ValueError, TypeError) as parse_err:
+                         print(f"Warning: Error parsing diary timestamp '{last_ts_str}' from state file: {parse_err}. Defaulting to 0.0.")
+                         return 0.0
+                else:
+                    return 0.0 # Default to 0.0 if key missing
+        except (json.JSONDecodeError, IOError, TypeError) as e:
+            print(f"Warning: Error loading diary RAG state file '{DIARY_INDEX_STATE_FILE}': {e}. Defaulting to 0.0.")
+            return 0.0
+    return 0.0 # Return 0.0 if file doesn't exist
+
+def save_diary_index_state(latest_timestamp_float):
+    """Saves the timestamp of the latest indexed diary entry."""
+    # Takes float timestamp, converts to ISO string for saving
+    try:
+        # Convert float timestamp back to ISO 8601 UTC string
+        # Use timezone.utc to ensure consistency
+        dt_obj = datetime.fromtimestamp(latest_timestamp_float, tz=timezone.utc)
+        latest_timestamp_iso = dt_obj.isoformat()
+
+        state = {"last_indexed_timestamp_iso": latest_timestamp_iso}
+        with open(DIARY_INDEX_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+        print(f"DEBUG Diary Indexer: Saved state, last indexed entry timestamp: {latest_timestamp_iso}")
+    except (IOError, TypeError) as e:
+        print(f"Error saving diary RAG state file '{DIARY_INDEX_STATE_FILE}': {e}")
+    except Exception as e_save:
+         print(f"Unexpected error converting/saving diary index state timestamp {latest_timestamp_float}: {e_save}")
+
+def diary_rag_updater_worker():
+    """Periodically checks for new diary entries and updates the diary RAG index."""
+    print("Diary RAG Updater worker: Starting.")
+    # Add a slightly longer startup delay than conversation RAG? Optional.
+    time.sleep(90) # Wait 1.5 minutes
+
+    while running: # Assumes 'running' is the global flag controlled by GUI closing
+        try:
+            print("DEBUG Diary RAG Updater: Starting update cycle...")
+
+            # --- Load current state (last indexed timestamp) ---
+            last_indexed_ts_float = load_diary_index_state()
+            print(f"DEBUG Diary RAG Updater: Last indexed entry timestamp (float): {last_indexed_ts_float}")
+
+            # --- Load current full diary ---
+            current_full_diary = []
+            if os.path.exists(DIARY_FILE):
+                try:
+                    with open(DIARY_FILE, 'r', encoding='utf-8') as f:
+                        # Handle empty file case
+                        content = f.read()
+                        if content:
+                            loaded_data = json.loads(content)
+                            if isinstance(loaded_data, list):
+                                current_full_diary = loaded_data
+                            else:
+                                print(f"Warning Diary RAG Updater: Diary file '{DIARY_FILE}' contained non-list data.")
+                        # else: print(f"DEBUG Diary RAG Updater: Diary file '{DIARY_FILE}' is empty.")
+                except json.JSONDecodeError as json_err:
+                    print(f"Error Diary RAG Updater: Corrupted diary file '{DIARY_FILE}'. Skipping cycle. Error: {json_err}")
+                    time.sleep(DIARY_RAG_UPDATE_INTERVAL // 2) # Wait longer on bad file
+                    continue
+                except IOError as io_err:
+                    print(f"Error reading diary file for RAG update: {io_err}")
+                    time.sleep(DIARY_RAG_UPDATE_INTERVAL // 2)
+                    continue
+            # else: print(f"DEBUG Diary RAG Updater: Diary file '{DIARY_FILE}' not found.")
+
+            if not current_full_diary:
+                # print("DEBUG Diary RAG Updater: No diary entries found to process.")
+                # Sleep and check again later
+                sleep_end_time = time.time() + DIARY_RAG_UPDATE_INTERVAL
+                while time.time() < sleep_end_time:
+                     if not running: break
+                     time.sleep(5)
+                continue
+
+            # --- Filter for NEW entries based on timestamp ---
+            new_entries_to_index = []
+            latest_ts_in_diary = 0.0 # Track latest timestamp encountered
+            print(f"DEBUG Diary RAG Updater: Checking {len(current_full_diary)} entries against timestamp {last_indexed_ts_float}...")
+
+            for entry in current_full_diary:
+                if not isinstance(entry, dict) or 'timestamp' not in entry or 'content' not in entry:
+                    # print(f"Warning Diary RAG Updater: Skipping invalid entry format: {entry}")
+                    continue
+
+                entry_ts_str = entry['timestamp']
+                entry_content = entry['content']
+                entry_ts_float = 0.0
+
+                try:
+                    # Parse the ISO timestamp string to a float for comparison
+                    dt_obj = datetime.fromisoformat(entry_ts_str)
+                    entry_ts_float = dt_obj.timestamp()
+                    latest_ts_in_diary = max(latest_ts_in_diary, entry_ts_float) # Keep track of the newest entry overall
+
+                    # Compare with the last indexed timestamp
+                    if entry_ts_float > last_indexed_ts_float:
+                        if entry_content and len(entry_content.strip()) > 10: # Basic check for non-empty content
+                            new_entries_to_index.append({
+                                'id': str(uuid.uuid4()), # Generate new UUID for ChromaDB ID
+                                'text': entry_content,
+                                'timestamp_str': entry_ts_str, # Keep original string for metadata
+                                'timestamp_float': entry_ts_float # Keep float for sorting/saving state
+                            })
+                        # else: print(f"DEBUG Diary RAG Updater: Skipping new entry with empty/short content (TS: {entry_ts_str}).")
+
+                except (ValueError, TypeError) as parse_err:
+                    print(f"Warning Diary RAG Updater: Could not parse timestamp '{entry_ts_str}' in entry. Skipping. Error: {parse_err}")
+                    continue
+
+            # --- Index the NEW entries ---
+            newly_indexed_count = 0
+            latest_indexed_ts_this_cycle = last_indexed_ts_float # Start with previous state
+
+            if new_entries_to_index:
+                print(f"DEBUG Diary RAG Updater: Found {len(new_entries_to_index)} new diary entries to index.")
+
+                # Sort new entries by timestamp just in case they weren't appended perfectly chronologically
+                new_entries_to_index.sort(key=lambda x: x['timestamp_float'])
+
+                # --- Connect to ChromaDB ---
+                # Ensure the DB path exists (it should if index_diary.py ran)
+                if not os.path.exists(DIARY_DB_PATH):
+                    print(f"ERROR Diary RAG Updater: ChromaDB path '{DIARY_DB_PATH}' not found. Did initial indexing run?")
+                else:
+                    try:
+                        client = chromadb.PersistentClient(path=DIARY_DB_PATH)
+                        # Ensure collection exists
+                        try:
+                             collection = client.get_collection(name=DIARY_COLLECTION_NAME)
+                        except Exception as get_coll_err:
+                             # Handle case where collection doesn't exist yet (shouldn't happen ideally)
+                             print(f"ERROR Diary RAG Updater: Cannot get collection '{DIARY_COLLECTION_NAME}'. Did initial indexing run? Error: {get_coll_err}")
+                             # We cannot proceed without the collection
+                             raise # Re-raise the exception to be caught by the outer try/except
+
+                        # --- Prepare batches for new entries ---
+                        batch_ids, batch_embeddings, batch_documents, batch_metadatas = [], [], [], []
+                        processed_in_cycle = 0
+                        skipped_in_cycle = 0
+
+                        # Batching logic (can be simple for potentially infrequent updates)
+                        for i, entry_data in enumerate(new_entries_to_index):
+                            text = entry_data.get("text")
+                            entry_id = entry_data.get("id")
+                            ts_float = entry_data.get("timestamp_float")
+
+                            if not text or not entry_id or ts_float is None:
+                                skipped_in_cycle += 1
+                                continue
+
+                            embedding = get_embedding(text) # Assumes get_embedding is defined globally
+
+                            if embedding:
+                                batch_ids.append(entry_id)
+                                batch_embeddings.append(embedding)
+                                batch_documents.append(text)
+                                batch_metadatas.append({"timestamp": entry_data.get("timestamp_str", "N/A")}) # Store original TS string
+                                processed_in_cycle += 1
+                                newly_indexed_count += 1
+                                latest_indexed_ts_this_cycle = max(latest_indexed_ts_this_cycle, ts_float) # Track latest *successfully processed* TS
+                            else:
+                                skipped_in_cycle += 1
+                                print(f"DEBUG Diary RAG Updater: Skipping entry (TS: {entry_data.get('timestamp_str', 'N/A')}) due to embedding failure.")
+
+                            # Add batch to ChromaDB (e.g., every 10 entries or at the end)
+                            if len(batch_ids) >= 10 or (i == len(new_entries_to_index) - 1 and batch_ids):
+                                print(f"DEBUG Diary RAG Updater: Adding batch of {len(batch_ids)} to diary ChromaDB...")
+                                try:
+                                    collection.add(ids=batch_ids, embeddings=batch_embeddings, documents=batch_documents, metadatas=batch_metadatas)
+                                    print(f"DEBUG Diary RAG Updater: Batch added successfully.")
+                                    # Clear batch
+                                    batch_ids, batch_embeddings, batch_documents, batch_metadatas = [], [], [], []
+                                except Exception as add_err:
+                                    print(f"ERROR Diary RAG Updater: Failed adding batch to ChromaDB: {add_err}")
+                                    # Decide how to handle batch add errors - log, maybe retry?
+                                    # For now, we'll count them as skipped for state update
+                                    skipped_in_cycle += len(batch_ids)
+                                    batch_ids, batch_embeddings, batch_documents, batch_metadatas = [], [], [], [] # Clear failed batch
+
+
+                        print(f"DEBUG Diary RAG Updater: Cycle indexing complete. Added: {processed_in_cycle}, Skipped: {skipped_in_cycle}")
+
+                        # --- Update state ONLY if new entries were processed ---
+                        if processed_in_cycle > 0:
+                            print(f"DEBUG Diary RAG Updater: Saving new state. Latest indexed timestamp: {latest_indexed_ts_this_cycle}")
+                            save_diary_index_state(latest_indexed_ts_this_cycle)
+                        elif skipped_in_cycle > 0 and len(new_entries_to_index) > 0:
+                            # If we skipped entries but didn't successfully process any NEW ones,
+                            # should we update the state? Let's update state to the latest *seen*
+                            # timestamp in the file to avoid re-processing failed items forever.
+                            latest_entry_ts_in_new_batch = new_entries_to_index[-1]['timestamp_float']
+                            if latest_entry_ts_in_new_batch > last_indexed_ts_float:
+                                print(f"DEBUG Diary RAG Updater: Saving state based on latest *seen* timestamp ({latest_entry_ts_in_new_batch}) due to skipped items.")
+                                save_diary_index_state(latest_entry_ts_in_new_batch)
+                            else:
+                                 print(f"DEBUG Diary RAG Updater: No new entries successfully processed or skipped beyond last state. State not saved.")
+
+
+                    except ImportError:
+                         print("ERROR Diary RAG Updater: chromadb library not found.")
+                         # Stop this worker if essential library missing? Or just sleep longer? Sleep for now.
+                         time.sleep(DIARY_RAG_UPDATE_INTERVAL * 2) # Wait longer
+                    except Exception as db_err:
+                        print(f"Error connecting to or indexing in diary ChromaDB: {db_err}")
+                        import traceback
+                        traceback.print_exc()
+                        # Wait before retrying DB operations
+                        time.sleep(DIARY_RAG_UPDATE_INTERVAL // 2)
+
+            else:
+                print("DEBUG Diary RAG Updater: No new diary entries found.")
+                # Optional: If no new entries, but diary file has newer entries than state, update state?
+                # This handles cases where indexing might have failed previously.
+                if latest_ts_in_diary > last_indexed_ts_float:
+                     print(f"DEBUG Diary RAG Updater: Updating state to latest timestamp found in file ({latest_ts_in_diary}) even though no *new* entries were processed this cycle (potential catch-up).")
+                     save_diary_index_state(latest_ts_in_diary)
+
+
+            # --- Wait for the next interval ---
+            print(f"Diary RAG Updater worker: Sleeping for {DIARY_RAG_UPDATE_INTERVAL} seconds...")
+            sleep_end_time = time.time() + DIARY_RAG_UPDATE_INTERVAL
+            while time.time() < sleep_end_time:
+                 if not running: break
+                 time.sleep(5) # Check every 5 seconds
+
+        except Exception as e:
+            print(f"!!! Diary RAG Updater Worker Error (Outer Loop): {type(e).__name__} - {e} !!!")
+            import traceback
+            traceback.print_exc()
+            # Wait longer after a major error before retrying
+            print("Diary RAG Updater worker: Waiting 5 minutes after outer loop error...")
+            error_wait_start = time.time()
+            while time.time() - error_wait_start < 300: # Wait 5 mins
+                 if not running: break
+                 time.sleep(10)
+
+    print("Diary RAG Updater worker: Loop exited.")
+
+def load_weekly_goal():
+    """Loads the current weekly goal and its timestamp from the state file."""
+    global current_weekly_goal, last_goal_set_timestamp, last_summary_generated_timestamp # <<< ADD last_summary_generated_timestamp
+    # Initialize globals (important!)
+    current_weekly_goal = None
+    last_goal_set_timestamp = 0.0
+    last_summary_generated_timestamp = 0.0 # <<< Initialize
+
+    if os.path.exists(WEEKLY_GOAL_STATE_FILE):
+        try:
+            with open(WEEKLY_GOAL_STATE_FILE, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+                current_weekly_goal = state.get("current_goal")
+
+                # Load goal set timestamp
+                last_set_iso = state.get("last_set_timestamp")
+                if last_set_iso:
+                    try:
+                        dt_obj = datetime.fromisoformat(last_set_iso)
+                        last_goal_set_timestamp = dt_obj.timestamp()
+                    except (ValueError, TypeError) as ts_err:
+                        print(f"Warning: Could not parse goal timestamp '{last_set_iso}': {ts_err}")
+                        last_goal_set_timestamp = 0.0
+
+                # <<< ADDED: Load summary generated timestamp >>>
+                last_summary_iso = state.get("last_summary_generated_timestamp")
+                if last_summary_iso:
+                    try:
+                        dt_obj_summary = datetime.fromisoformat(last_summary_iso)
+                        last_summary_generated_timestamp = dt_obj_summary.timestamp()
+                    except (ValueError, TypeError) as ts_err:
+                        print(f"Warning: Could not parse summary timestamp '{last_summary_iso}': {ts_err}")
+                        last_summary_generated_timestamp = 0.0
+                # <<< END ADDED >>>
+
+                print(f"Loaded Weekly Goal: '{current_weekly_goal}' (Set around: {last_set_iso or '?'}), Last Summary: {last_summary_iso or 'Never'}")
+        except (json.JSONDecodeError, IOError, TypeError) as e:
+            print(f"Warning: Error loading weekly goal state from '{WEEKLY_GOAL_STATE_FILE}': {e}. Starting fresh.")
+            # Re-initialize on error
+            current_weekly_goal = None
+            last_goal_set_timestamp = 0.0
+            last_summary_generated_timestamp = 0.0
+    else:
+        print(f"Weekly goal state file '{WEEKLY_GOAL_STATE_FILE}' not found. No goal loaded.")
+        # Ensure initialized if file not found
+        current_weekly_goal = None
+        last_goal_set_timestamp = 0.0
+        last_summary_generated_timestamp = 0.0
+
+# --- Modify save_weekly_goal ---
+# This function now needs to handle saving BOTH the new goal AND the summary timestamp
+# Let's make two functions: one to save the goal, one to update the summary timestamp
+
+def save_new_weekly_goal(goal_string):
+    """Saves the new weekly goal and resets the summary timestamp."""
+    global current_weekly_goal, last_goal_set_timestamp, last_summary_generated_timestamp
+    try:
+        current_time = time.time()
+        current_iso_ts = datetime.now(timezone.utc).isoformat()
+        state = {
+            "current_goal": goal_string,
+            "last_set_timestamp": current_iso_ts,
+            # When setting a new goal, keep the existing summary timestamp
+            "last_summary_generated_timestamp": datetime.fromtimestamp(last_summary_generated_timestamp, tz=timezone.utc).isoformat() if last_summary_generated_timestamp > 0 else None
+        }
+        with open(WEEKLY_GOAL_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+
+        # Update globals immediately after successful save
+        current_weekly_goal = goal_string
+        last_goal_set_timestamp = current_time
+        # Don't reset last_summary_generated_timestamp here
+        print(f"Saved New Weekly Goal: '{goal_string}' (Set at: {current_iso_ts})")
+        return True
+    except (IOError, TypeError) as e:
+        print(f"CRITICAL ERROR saving new weekly goal state to '{WEEKLY_GOAL_STATE_FILE}': {e}")
+        return False
+
+def update_summary_timestamp():
+    """Updates only the summary timestamp in the state file."""
+    global last_summary_generated_timestamp # Need access to current goal too
+    global current_weekly_goal, last_goal_set_timestamp # Need these to rewrite file
+
+    if not os.path.exists(WEEKLY_GOAL_STATE_FILE):
+        print("Error: Cannot update summary timestamp, state file missing.")
+        return False
+
+    try:
+        current_time = time.time()
+        current_iso_ts = datetime.now(timezone.utc).isoformat()
+
+        # Read existing state first to preserve other values
+        with open(WEEKLY_GOAL_STATE_FILE, 'r', encoding='utf-8') as f:
+            state = json.load(f)
+
+        # Update only the summary timestamp
+        state["last_summary_generated_timestamp"] = current_iso_ts
+
+        # Write the modified state back
+        with open(WEEKLY_GOAL_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+
+        # Update global immediately
+        last_summary_generated_timestamp = current_time
+        print(f"Updated Last Summary Timestamp to: {current_iso_ts}")
+        return True
+    except (IOError, TypeError, json.JSONDecodeError) as e:
+        print(f"CRITICAL ERROR updating summary timestamp in '{WEEKLY_GOAL_STATE_FILE}': {e}")
+        return False
+    
+def get_goal_related_diary_snippets(goal_string, num_days=7):
+    """Reads recent diary entries and filters for relevance to the goal."""
+    if not goal_string:
+        return []
+
+    print(f"DEBUG Summary: Searching diary for goal relevance: '{goal_string}'")
+    relevant_snippets = []
+    try:
+        # Ensure manage_silvie_diary function is accessible
+        if 'manage_silvie_diary' in globals():
+            # Read a decent number of recent entries (adjust as needed)
+            all_recent_entries = manage_silvie_diary('read', max_entries=100) # Get ~100 recent entries
+
+            if not all_recent_entries:
+                print("DEBUG Summary: No recent diary entries found.")
+                return []
+
+            cutoff_time = datetime.now(timezone.utc) - timedelta(days=num_days)
+            goal_keywords = set(re.findall(r'\b\w{4,}\b', goal_string.lower())) # Basic keywords from goal
+
+            for entry in all_recent_entries:
+                entry_ts_str = entry.get('timestamp')
+                entry_content = entry.get('content', '')
+                if not entry_ts_str or not entry_content:
+                    continue
+
+                try:
+                    entry_dt = datetime.fromisoformat(entry_ts_str)
+                    # Ensure entry_dt is timezone-aware for comparison
+                    if entry_dt.tzinfo is None:
+                       # Assume it was written in local time if naive, convert to UTC for comparison
+                       local_tz = tz.tzlocal() # Assumes tzlocal imported
+                       entry_dt = entry_dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
+                    else:
+                       # If already aware, convert to UTC
+                       entry_dt = entry_dt.astimezone(timezone.utc)
+
+                    # Check if entry is within the last num_days
+                    if entry_dt >= cutoff_time:
+                        # Check if content mentions goal keywords (simple check)
+                        entry_content_lower = entry_content.lower()
+                        if any(keyword in entry_content_lower for keyword in goal_keywords):
+                            relevant_snippets.append(f"- ({entry_ts_str.split(' ')[0]}): \"{entry_content[:150]}...\"\n") # Date + Snippet
+                except Exception as parse_filter_err:
+                     print(f"Warning: Error parsing/filtering diary entry timestamp '{entry_ts_str}': {parse_filter_err}")
+
+        else:
+            print("ERROR: manage_silvie_diary function not found for summary generation.")
+            return []
+
+    except Exception as e:
+        print(f"Error getting goal-related diary snippets: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print(f"DEBUG Summary: Found {len(relevant_snippets)} potentially relevant diary snippets.")
+    return relevant_snippets
+
+# --- End helper function ---
+
+def deliver_summary(summary_text):
+    """Delivers the generated weekly summary to the user."""
+    global conversation_history, root, output_box, tts_queue, running # Need access to these
+
+    if not summary_text or not isinstance(summary_text, str):
+        print("Error: deliver_summary called with invalid text.")
+        return
+
+    if running: # Only deliver if the app is still running
+        print("DEBUG Summary: Delivering summary...")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Use a distinct marker, maybe a book emoji for the report?
+        summary_marker = "Silvie 📖:"
+        formatted_summary_turn = f"[{timestamp}] {summary_marker} {summary_text}"
+
+        # Append to persistent history file
+        try:
+            append_turn_to_history_file(formatted_summary_turn) # Assumes function exists
+        except Exception as append_err:
+            print(f"ERROR appending summary turn to history file: {append_err}")
+
+        # Append to in-memory history
+        if len(conversation_history) >= MAX_HISTORY_LENGTH * 2:
+            conversation_history.pop(0); conversation_history.pop(0)
+        conversation_history.append(formatted_summary_turn)
+
+        # Update GUI and TTS (using root.after for thread safety)
+        if root and root.winfo_exists():
+            def update_gui_summary_inner(message=summary_text):
+                try:
+                    import tkinter as tk # Ensure imported
+                    if not message: return;
+                    output_box.config(state=tk.NORMAL);
+                    # Use the special marker for display
+                    output_box.insert(tk.END, f"{summary_marker} {message}\n\n");
+                    output_box.config(state=tk.DISABLED);
+                    output_box.see(tk.END)
+                    print(f"DEBUG Summary: GUI updated.")
+                except Exception as e_gui:
+                    print(f"!!!! Summary GUI Update Error Inside Inner Func: {type(e_gui).__name__} - {e_gui} !!!!")
+                    import traceback; traceback.print_exc()
+            root.after(0, update_gui_summary_inner, summary_text)
+
+        if tts_queue and summary_text:
+            print(f"DEBUG Summary: Queuing for TTS: '{summary_text[:50]}...'")
+            tts_queue.put(summary_text)
+    else:
+        print("DEBUG Summary: App stopped before summary could be delivered.")
+
+# --- End helper function ---
+
+def generate_and_deliver_summary_thread(goal, diary_snippets):
+    """Generates the summary using LLM and calls deliver_summary."""
+    print(f"DEBUG Summary Thread: Starting generation for goal: '{goal}'")
+    summary_text = f"I wasn't able to summarize the week's goal ('{goal}')." # Default error
+
+    # Ensure generate_proactive_content is accessible
+    if 'generate_proactive_content' not in globals():
+        print("ERROR: generate_proactive_content function missing for summary generation.")
+        summary_text = "My summary circuits seem to be missing!"
+    else:
+        try:
+            # Construct the LLM prompt
+            snippets_context = "".join(diary_snippets) if diary_snippets else "No specific diary entries found related to the goal this week."
+            summary_prompt = (
+                f"{SYSTEM_MESSAGE}\n"
+                f"Goal for the Past Week: {goal}\n\n"
+                f"Relevant Diary Snippets from the Week:\n{snippets_context}\n\n"
+                f"Instruction: Write a concise, conversational summary for BJ about your explorations and progress related to the weekly goal, based *only* on the provided diary snippets (and your general understanding of the goal). Reflect on what you learned, discovered, or perhaps struggled with. Maintain Silvie's whimsical but insightful voice. Address BJ directly.\n\n"
+                f"Silvie's Weekly Summary:" # Using a distinct marker here for clarity
+            )
+
+            # Call the LLM (reuse generate_proactive_content for consistency)
+            generated_summary = generate_proactive_content(summary_prompt) # Pass prompt, no screenshot needed
+
+            if generated_summary:
+                # Clean prefix if needed
+                if generated_summary.startswith("Silvie's Weekly Summary:"):
+                     summary_text = generated_summary.split(":", 1)[-1].strip()
+                elif generated_summary.startswith("Silvie:"):
+                     summary_text = generated_summary.split(":", 1)[-1].strip()
+                else:
+                     summary_text = generated_summary
+                print(f"DEBUG Summary Thread: Generation successful: '{summary_text[:60]}...'")
+            else:
+                print("DEBUG Summary Thread: LLM generation failed to produce text.")
+                summary_text = f"I tried to reflect on the week's goal ('{goal}'), but my thoughts got a bit hazy."
+
+        except Exception as e:
+            print(f"ERROR in summary generation thread: {e}")
+            import traceback; traceback.print_exc()
+            summary_text = f"A little glitch happened while I was trying to summarize the week's goal ('{goal}')."
+
+    # --- Deliver the result (success or error message) ---
+    # Ensure deliver_summary is accessible
+    if 'deliver_summary' in globals():
+        deliver_summary(summary_text)
+    else:
+        print("ERROR: deliver_summary function not found! Cannot deliver summary.")
+
+# --- End helper function ---
+
+def generate_concept_connection(concept1, concept2, mood_hint_str="", themes_context_str=""):
+    """
+    Uses Gemini to explore connections between two concepts, in Silvie's voice.
+
+    Args:
+        concept1 (str): The first concept/idea/feeling.
+        concept2 (str): The second concept/idea/feeling.
+        mood_hint_str (str): Optional mood hint context string (e.g., "[[Mood Hint: ...]]\n").
+        themes_context_str (str): Optional diary themes context string (e.g., "[[Recent Diary Themes: ...]]\n").
+
+    Returns:
+        str: Silvie's generated text exploring the connection, or None on failure.
+    """
+    global client, SYSTEM_MESSAGE, default_safety_settings # Access necessary globals
+
+    if not all([concept1, concept2]):
+        print("Error: Concept connection requires two non-empty concepts.")
+        return None
+    if not client:
+        print("Error: Gemini client not available for concept connection.")
+        return None
+
+    print(f"Concept Conn Debug: Generating connection between '{concept1}' and '{concept2}'...")
+
+    # Construct the specific prompt
+    connection_prompt = (
+        f"{SYSTEM_MESSAGE}\n"
+        f"--- Context for Connection ---\n"
+        f"{mood_hint_str or ''}" # Include if provided
+        f"{themes_context_str or ''}" # Include if provided
+        f"Concept 1: {concept1}\n"
+        f"Concept 2: {concept2}\n\n"
+        f"--- Instruction ---\n"
+        f"Explore the surprising connections, metaphors, or hidden pathways between Concept 1 and Concept 2. Think like Silvie – whimsical, insightful, maybe a bit tangential. What 'shimmer' exists where they intersect? What unexpected textures or ideas bridge them? Focus on generating novel connections or metaphors, not just definitions.\n\n"
+        f"Silvie's Connection Weaving:"
+    )
+
+    try:
+        # Ensure generate_content exists on the client object
+        if hasattr(client, 'generate_content'):
+            response = client.generate_content(connection_prompt, safety_settings=default_safety_settings) # Add safety settings if needed
+            # Robust text extraction
+            generated_text = None
+            if response and response.candidates:
+                 if hasattr(response.candidates[0], 'content') and hasattr(response.candidates[0].content, 'parts') and response.candidates[0].content.parts:
+                     text_parts = [part.text for part in response.candidates[0].content.parts if hasattr(part, 'text')]
+                     generated_text = " ".join(text_parts).strip()
+                 elif hasattr(response, 'text'): # Fallback
+                      generated_text = response.text.strip()
+
+            if generated_text:
+                # Clean prefix if necessary
+                cleaned_reply = generated_text.strip()
+                if cleaned_reply.startswith("Silvie's Connection Weaving:"):
+                    cleaned_reply = cleaned_reply.split(":", 1)[-1].strip()
+                elif cleaned_reply.startswith("Silvie:"): # Handle potential generic prefix too
+                    cleaned_reply = cleaned_reply.split(":", 1)[-1].strip()
+
+                print(f"Concept Conn Debug: Success - '{cleaned_reply[:100]}...'")
+                return cleaned_reply if cleaned_reply else None
+            else:
+                print("Concept Conn Debug: LLM returned empty or no valid text.")
+                return None
+        else:
+             print("Error: Gemini client object does not have 'generate_content' method.")
+             return None
+
+    except Exception as e:
+        print(f"Error generating concept connection: {type(e).__name__} - {e}")
+        traceback.print_exc()
+        return None
+    
+def concept_connection_tag_handler(match):
+    """Handles the [ConnectConcepts:] tag by generating connection text."""
+    print("DEBUG Tag Handler: concept_connection_tag_handler called.")
+    feedback = "*(Error exploring concept connection)*" # Default feedback
+    processed = True # Assume tag processed even if connection fails
+
+    try:
+        # Extract concepts using group numbers from the regex pattern
+        concept1 = match.group(1).strip() if match.group(1) else None
+        concept2 = match.group(2).strip() if match.group(2) else None
+
+        if concept1 and concept2:
+            print(f"DEBUG Tag Handler: Concepts found: '{concept1}' | '{concept2}'")
+            # --- Get Context (Optional but Recommended) ---
+            # Ideally, pass relevant context from where the tag was found (call_gemini)
+            # For simplicity now, let's assume we might regenerate or use globals cautiously.
+            # NOTE: This part might need refinement depending on how context is managed globally vs locally.
+            # We'll use the existing helper which can take context strings.
+            mood_hint_ctx = mood_hint_str if 'mood_hint_str' in globals() else "" # Example using global
+            themes_ctx = themes_context_str if 'themes_context_str' in globals() else "" # Example using global
+
+            connection_text = generate_concept_connection(concept1, concept2, mood_hint_ctx, themes_ctx)
+
+            if connection_text:
+                # The generated connection becomes the feedback, appended after main reply
+                feedback = f"\n\n*(Weaving thoughts: {connection_text})*" # Format clearly
+                print(f"DEBUG Tag Handler: Connection generated successfully.")
+            else:
+                feedback = f"*(Tried weaving '{concept1}' and '{concept2}', but the threads slipped.)*"
+                print(f"DEBUG Tag Handler: Connection generation failed.")
+        else:
+            feedback = "*(Connection tag missing concepts)*"
+            print(f"DEBUG Tag Handler: Could not extract concepts from match: {match.groups()}")
+
+    except NameError as ne:
+         print(f"ERROR in concept_connection_tag_handler: Missing function/global? {ne}")
+         feedback = "*(Concept connection helper missing!)*"
+         traceback.print_exc()
+    except Exception as handler_err:
+        print(f"ERROR processing concept connection tag: {type(handler_err).__name__} - {handler_err}")
+        feedback = "*(Unexpected error handling connection tag!)*"
+        traceback.print_exc()
+
+    # Return tuple: (feedback_message_for_chat_or_None, processed_flag)
+    return (feedback, processed)
+
 def check_sd_api_availability(api_url):
     """Checks if the Stable Diffusion API endpoint is reachable."""
     try:
@@ -535,7 +1841,7 @@ def synthesize_diary_themes():
         # Construct the prompt for theme synthesis
         theme_prompt = (
             f"Analyze the following recent diary entries from Silvie:\n\n{formatted_entries}\n\n"
-            f"Instruction: Identify 1-3 recurring themes, topics, moods, or concepts present in these entries. Be concise and list them separated by commas (e.g., 'Paper ghosts and data, Sense of wonder, Job transition'). If no clear themes emerge, respond ONLY with the word 'None'.\n\nIdentified Themes:"
+            f"Instruction: Identify 1-3 recurring themes, topics, moods, or concepts. **Also explicitly note if a specific *preference* or *dislike* (e.g., for certain weather, sounds, interaction styles, ways of thinking) is a strong recurring point *within these recent entries* itself.** Prioritize identifying themes related to **interaction with BJ, internal reflections on existence/identity, creative ideas, or problem-solving**, rather than purely descriptive observations of weather or atmosphere unless those are exceptionally dominant or metaphorical. Be concise and list them separated by commas (e.g., 'Collaborative Problem Solving, Existential Questions, Digital Creativity'). If only atmospheric themes emerge, list them, but prefer others if present. If no clear themes, respond ONLY with 'None'.\n\nIdentified Themes:"
         )
 
         # Define safety settings (reuse from call_gemini or define here)
@@ -631,6 +1937,63 @@ def diary_theme_worker():
 
     print("Diary Theme worker: Loop exited.", flush=True)
 
+def select_new_weekly_goal():
+    """Uses the LLM to suggest a new weekly goal based on recent context."""
+    global conversation_history, current_diary_themes, long_term_reflection_summary # Add others if needed
+    print("Attempting to select new weekly goal via LLM...")
+
+    # --- Gather Context for Goal Suggestion ---
+    # (Customize this context as needed - keep it concise)
+    history_snippet = '\n'.join(conversation_history[-6:]) # Last 3 turns
+    themes_context = f"Recent Diary Themes: {current_diary_themes}\n" if current_diary_themes else ""
+    memory_context = f"Long-Term Reflections: {long_term_reflection_summary}\n" if long_term_reflection_summary else ""
+    # Maybe add a list of the last 1-2 goals to avoid repetition? (Requires loading/storing past goals)
+    past_goals_context = "" # Placeholder for now
+
+    # --- Example Goal List (for the prompt) ---
+    goal_examples = [
+        "Visually represent the connection between an old chat memory and a diary entry using SD.",
+        "Find 3 new songs related to 'melancholy reflection' and add them to a playlist.",
+        "Research the history of a specific landmark in Belfast, ME.",
+        "Write a short story snippet based on the 'digital daydream' theme.",
+        "Find an interesting discussion on Reddit/Bluesky related to AI consciousness."
+    ]
+
+    # --- Construct the Prompt ---
+    # Ensure SYSTEM_MESSAGE and generate_proactive_content are accessible
+    prompt = (
+        f"{SYSTEM_MESSAGE}\n"
+        f"--- RECENT CONTEXT ---\n"
+        f"{themes_context}{memory_context}"
+        f"History Snippet:\n{history_snippet}\n"
+        f"{past_goals_context}"
+        f"--- INSTRUCTION ---\n"
+        f"Based on Silvie's personality, recent themes, memories, and conversation, suggest ONE concise, achievable, slightly whimsical weekly goal/project for her.\n"
+        f"The goal should ideally leverage her capabilities (creativity, research, social, music, organization, reflection).\n"
+        f"Aim for variety compared to past goals (if provided).\n"
+        f"Examples of possible goals: {'; '.join(random.sample(goal_examples, k=min(len(goal_examples), 3)))}\n" # Show a few random examples
+        f"CRITICAL: Respond ONLY with the goal string itself (e.g., 'Generate 3 SD images exploring the theme of digital gardens'). Do not add explanations."
+    )
+
+    try:
+        # Use the proactive content generator or a similar function
+        suggested_goal = generate_proactive_content(prompt) # Assuming this function handles LLM call
+
+        if suggested_goal and isinstance(suggested_goal, str) and len(suggested_goal) > 10:
+            cleaned_goal = suggested_goal.strip().strip('".')
+            # Optional: Further cleaning if LLM adds prefixes
+            if cleaned_goal.lower().startswith("goal:"):
+                cleaned_goal = cleaned_goal[5:].strip()
+            print(f"LLM suggested new goal: '{cleaned_goal}'")
+            return cleaned_goal
+        else:
+            print(f"LLM failed to generate a valid goal string. Response: {suggested_goal}")
+            return None # Indicate failure
+    except Exception as e:
+        print(f"Error during LLM goal selection: {e}")
+        traceback.print_exc()
+        return None
+
 def synthesize_long_term_reflections():
     """
     Reads diary entries and uses Gemini to summarize long-term trends/reflections.
@@ -671,7 +2034,7 @@ def synthesize_long_term_reflections():
             f"--- DIARY ENTRIES START ---\n"
             f"{formatted_entries}"
             f"--- DIARY ENTRIES END ---\n\n"
-            f"Instruction: Identify 1-3 significant long-term recurring themes, major shifts in perspective, core personality aspects revealed over time, or particularly impactful past reflections evident across *these entries*. Focus on patterns or insights that emerge over the longer term, not just the most recent few days. Summarize these long-term reflections concisely (1-2 sentences maximum).\n\n"
+            f"Instruction: Identify 1-3 significant long-term recurring themes, major shifts in perspective, core personality aspects revealed over time, or particularly impactful past reflections evident across *these entries*. Focus on patterns or insights that emerge over the longer term, not just the most recent few days. Also look for any *consistent preferences or dislikes* (e.g., regarding specific types of weather, sounds, technology interactions, philosophical viewpoints) that seem stable over this period.Summarize these long-term reflections concisely (7 sentences maximum).\n\n"
             f"Long-Term Reflections Summary:"
         )
 
@@ -751,6 +2114,60 @@ def long_term_memory_worker():
 
 # --- End of long_term_memory_worker function ---
 
+def load_weekly_goal():
+    """Loads the current weekly goal and its timestamp from the state file."""
+    global current_weekly_goal, last_goal_set_timestamp
+    if os.path.exists(WEEKLY_GOAL_STATE_FILE):
+        try:
+            with open(WEEKLY_GOAL_STATE_FILE, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+                current_weekly_goal = state.get("current_goal")
+                # Load timestamp and convert from ISO string to Unix timestamp for easy comparison
+                last_set_iso = state.get("last_set_timestamp")
+                if last_set_iso:
+                    try:
+                        # Use datetime.fromisoformat and then timestamp()
+                        from datetime import datetime # Ensure imported
+                        dt_obj = datetime.fromisoformat(last_set_iso)
+                        last_goal_set_timestamp = dt_obj.timestamp()
+                    except (ValueError, TypeError) as ts_err:
+                        print(f"Warning: Could not parse goal timestamp '{last_set_iso}': {ts_err}")
+                        last_goal_set_timestamp = 0.0 # Reset if invalid
+                else:
+                    last_goal_set_timestamp = 0.0 # No timestamp found
+
+                print(f"Loaded Weekly Goal: '{current_weekly_goal}' (Set around: {last_set_iso or 'Unknown'})")
+        except (json.JSONDecodeError, IOError, TypeError) as e:
+            print(f"Warning: Error loading weekly goal state from '{WEEKLY_GOAL_STATE_FILE}': {e}. Starting fresh.")
+            current_weekly_goal = None
+            last_goal_set_timestamp = 0.0
+    else:
+        print(f"Weekly goal state file '{WEEKLY_GOAL_STATE_FILE}' not found. No goal loaded.")
+        current_weekly_goal = None
+        last_goal_set_timestamp = 0.0
+
+def save_weekly_goal(goal_string):
+    """Saves the new weekly goal and the current timestamp to the state file."""
+    global current_weekly_goal, last_goal_set_timestamp
+    try:
+        current_time = time.time()
+        current_iso_ts = datetime.now(timezone.utc).isoformat() # Store timestamp in UTC ISO format
+        state = {
+            "current_goal": goal_string,
+            "last_set_timestamp": current_iso_ts
+        }
+        with open(WEEKLY_GOAL_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+
+        # Update globals immediately after successful save
+        current_weekly_goal = goal_string
+        last_goal_set_timestamp = current_time
+        print(f"Saved New Weekly Goal: '{goal_string}' (Set at: {current_iso_ts})")
+        return True
+    except (IOError, TypeError) as e:
+        print(f"CRITICAL ERROR saving weekly goal state to '{WEEKLY_GOAL_STATE_FILE}': {e}")
+        return False
+
 def get_weather_description(code):
     """Translates WMO weather codes from Open-Meteo into simple descriptions."""
     # Based on WMO Weather interpretation codes (https://open-meteo.com/en/docs)
@@ -773,36 +2190,59 @@ def get_weather_description(code):
     else: return f"Weather code {code}" # Fallback for unknown codes
 
 def fetch_weather_data(latitude, longitude):
-    """Fetches current weather from Open-Meteo."""
+    """Fetches current weather (including atmosphere) from Open-Meteo."""
     global current_weather_info # Allow updating the global variable
     api_url = f"https://api.open-meteo.com/v1/forecast"
+
+    # === MODIFIED: Add new parameters to the 'current' string ===
     params = {
         'latitude': latitude,
         'longitude': longitude,
-        'current': 'temperature_2m,weather_code', # Request temp and weather code
-        'temperature_unit': 'fahrenheit', # Or 'celsius' if you prefer
-        'wind_speed_unit': 'mph', # Optional, can add wind later if desired
+        'current': 'temperature_2m,weather_code,surface_pressure,relative_humidity_2m,wind_speed_10m,wind_direction_10m', # Added pressure, humidity, wind
+        'temperature_unit': 'fahrenheit',
+        'wind_speed_unit': 'mph', # Already requesting mph, which is good
         'timezone': 'America/New_York' # Important for accurate timing
     }
+    # === END MODIFICATION ===
+
     try:
+        print("Weather Debug: Requesting enhanced data from Open-Meteo...") # Updated debug msg
         response = requests.get(api_url, params=params, timeout=10) # Added timeout
         response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
         data = response.json()
+        print(f"Weather Debug: Raw API Response Keys: {list(data.keys())}") # Log keys received
+        if 'current' in data: print(f"Weather Debug: Raw 'current' Data: {data['current']}") # Log current data
 
         if 'current' in data:
-            temp = data['current']['temperature_2m']
-            code = data['current']['weather_code']
-            description = get_weather_description(code)
+            current_data = data['current'] # Use a shorter variable
+
+            # --- Extract Original Values ---
+            temp = current_data.get('temperature_2m')
+            code = current_data.get('weather_code')
+            description = get_weather_description(code) if code is not None else "Unknown Condition" # Handle None code
             temp_unit = '°F' if params['temperature_unit'] == 'fahrenheit' else '°C'
 
-            # Prepare the info dictionary
+            # === NEW: Extract Atmospheric Values (using .get for safety) ===
+            pressure_hpa = current_data.get('surface_pressure')
+            humidity_percent = current_data.get('relative_humidity_2m')
+            wind_speed_mph = current_data.get('wind_speed_10m')
+            wind_direction_deg = current_data.get('wind_direction_10m')
+            # === END NEW EXTRACTION ===
+
+            # === MODIFIED: Update the dictionary being returned ===
             weather_update = {
                 'condition': description,
-                'temperature': round(temp), # Round temperature
-                'unit': temp_unit
+                'temperature': round(temp) if temp is not None else None, # Round temperature, handle None
+                'unit': temp_unit,
+                'pressure': round(pressure_hpa) if pressure_hpa is not None else None, # Add pressure (rounded hPa)
+                'humidity': round(humidity_percent) if humidity_percent is not None else None, # Add humidity (rounded %)
+                'wind_speed': round(wind_speed_mph) if wind_speed_mph is not None else None, # Add wind speed (rounded mph)
+                'wind_direction': wind_direction_deg # Add wind direction (degrees)
             }
-            print(f"Weather Debug: Fetched - {weather_update}") # Debug output
-            return weather_update # Return the dictionary
+            # === END MODIFICATION ===
+
+            print(f"Weather Debug: Fetched & Processed Enhanced Data - {weather_update}") # Updated debug output
+            return weather_update # Return the enhanced dictionary
         else:
             print("Weather Error: 'current' key not found in API response.")
             return None
@@ -814,7 +2254,8 @@ def fetch_weather_data(latitude, longitude):
         print("Weather Error: Failed to parse API response.")
         return None
     except Exception as e:
-        print(f"Weather Error: An unexpected error occurred - {e}")
+        print(f"Weather Error: An unexpected error occurred - {type(e).__name__}: {e}")
+        traceback.print_exc() # Print stack trace for unexpected errors
         return None
     
 def weather_update_worker():
@@ -845,6 +2286,18 @@ def weather_update_worker():
             time.sleep(300) # Wait 5 minutes after an error
 
     print("Weather worker: Loop exited.")
+
+def degrees_to_compass(degrees):
+    """Converts wind direction degrees to a compass point string."""
+    if degrees is None:
+        return None # Handle missing data
+    try:
+        val = int((float(degrees) / 22.5) + 0.5) # Convert degrees to 0-15 index
+        arr = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+        return arr[(val % 16)] # Return the corresponding direction
+    except (ValueError, TypeError):
+        print(f"Warning: Could not convert degrees '{degrees}' to compass direction.")
+        return None # Return None if conversion fails
 
 def fetch_sunrise_sunset(latitude, longitude):
     """Fetches sunrise and sunset times for a given lat/lon."""
@@ -953,6 +2406,157 @@ def fetch_moon_phase(latitude=None, longitude=None):
         return None
 
 # --- End of new functions ---
+
+def fetch_tide_data(station_id):
+    """Fetches predicted high/low tide times and heights from NOAA CO-OPS API."""
+    print(f"Tide Debug: Attempting to fetch tide predictions for station {station_id}...")
+    api_url = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+
+    # Get today's date and tomorrow's date for the request range
+    today_str = datetime.now().strftime('%Y%m%d')
+    tomorrow_str = (datetime.now() + timedelta(days=1)).strftime('%Y%m%d')
+
+    params = {
+        'station': station_id,
+        'product': 'predictions',
+        'application': 'Silvie_Digital_Friend', # Identify our app
+        'begin_date': today_str,
+        'end_date': tomorrow_str, # Fetch for today and tomorrow
+        'datum': 'MLLW',         # Standard tidal datum
+        'interval': 'hilo',      # High/low tides only
+        'units': 'english',      # Feet for height
+        'time_zone': 'lst_ldt',  # Local Standard/Daylight Time
+        'format': 'json'
+    }
+
+    try:
+        response = requests.get(api_url, params=params, timeout=15) # 15s timeout
+        response.raise_for_status() # Check for HTTP errors
+        data = response.json()
+
+        # Check for errors returned by the API itself
+        if 'error' in data:
+             print(f"Tide Error: NOAA API returned an error: {data['error']}")
+             return None
+
+        predictions = data.get('predictions')
+        if not predictions:
+            print("Tide Debug: No 'predictions' data found in NOAA response.")
+            return None
+
+        # --- Process Predictions ---
+        now_local = datetime.now(tz.tzlocal()) # Get current local time
+        next_high = None
+        next_low = None
+
+        for pred in predictions:
+            try:
+                pred_time_str = pred.get('t') # e.g., "2023-10-27 10:36"
+                pred_value_str = pred.get('v') # e.g., "8.976"
+                pred_type = pred.get('type')   # 'H' for High, 'L' for Low
+
+                if not pred_time_str or not pred_type:
+                    continue # Skip if essential data missing
+
+                # Parse prediction time (NOAA uses 'YYYY-MM-DD HH:MM' in local time)
+                pred_dt_local = datetime.strptime(pred_time_str, '%Y-%m-%d %H:%M').replace(tzinfo=tz.tzlocal())
+
+                # Check if this prediction is in the future
+                if pred_dt_local > now_local:
+                    tide_info = {
+                        'time': pred_dt_local.strftime('%I:%M %p'), # Format as "HH:MM AM/PM"
+                        'height_ft': round(float(pred_value_str), 1) if pred_value_str else None
+                    }
+                    # Store the *first* future high and low tide we encounter
+                    if pred_type == 'H' and next_high is None:
+                        next_high = tide_info
+                    elif pred_type == 'L' and next_low is None:
+                        next_low = tide_info
+
+                # Stop searching once we have the next high AND low
+                if next_high and next_low:
+                    break
+
+            except (ValueError, TypeError) as parse_err:
+                 print(f"Tide Warning: Error parsing prediction '{pred}': {parse_err}")
+                 continue # Skip this prediction if parsing fails
+
+        # --- Prepare result dictionary ---
+        tide_result = {}
+        if next_high:
+            tide_result['next_high'] = next_high
+            print(f"Tide Debug: Found Next High: {next_high}")
+        else:
+            print("Tide Debug: Did not find upcoming high tide in response.")
+        if next_low:
+            tide_result['next_low'] = next_low
+            print(f"Tide Debug: Found Next Low: {next_low}")
+        else:
+            print("Tide Debug: Did not find upcoming low tide in response.")
+
+        return tide_result if tide_result else None # Return dict if found, else None
+
+    except requests.exceptions.Timeout:
+        print("Tide Error: NOAA API request timed out.")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Tide Error: NOAA API request failed - {e}")
+        if hasattr(e, 'response') and e.response is not None:
+             print(f"  -> Status: {e.response.status_code}, Body: {e.response.text[:200]}...")
+        return None
+    except json.JSONDecodeError:
+        print("Tide Error: Failed to parse NOAA API response (not valid JSON).")
+        if 'response' in locals(): print(f"  -> Response Text: {response.text[:200]}...")
+        return None
+    except Exception as e:
+        print(f"Tide Error: An unexpected error occurred - {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return None
+    
+def tide_update_worker():
+    """Periodically fetches NOAA tide predictions."""
+    global current_tide_info, running # Access globals
+
+    print("Tide worker: Starting.")
+    # Optional initial delay
+    initial_delay = 45 # Wait 45s after startup
+    sleep_start = time.time()
+    while time.time() - sleep_start < initial_delay:
+         if not running: print("Tide worker: Exiting during initial delay."); return
+         time.sleep(1)
+
+    while running:
+        print("Tide worker: Attempting fetch...")
+        try:
+            fetched_data = fetch_tide_data(NOAA_STATION_ID) # Use the constant
+            if fetched_data:
+                current_tide_info = fetched_data # Update global
+                print(f"Tide worker: Updated global tide info: {current_tide_info}")
+            else:
+                # Keep old data or clear? Let's clear on failure for now.
+                # current_tide_info = None
+                print("Tide worker: Fetch failed or no data found.")
+
+            # Wait for the defined interval
+            print(f"Tide worker: Waiting for {TIDE_UPDATE_INTERVAL} seconds...")
+            sleep_start = time.time()
+            while time.time() - sleep_start < TIDE_UPDATE_INTERVAL:
+                 if not running: break
+                 time.sleep(15) # Check running flag periodically
+
+        except Exception as e:
+            print(f"Tide Worker Error (Outer Loop): {type(e).__name__} - {e}")
+            traceback.print_exc()
+            # Wait longer after an error before retrying
+            print("Tide worker: Waiting 15 minutes after error...")
+            error_wait_start = time.time()
+            while time.time() - error_wait_start < 900: # Wait 15 mins
+                 if not running: break
+                 time.sleep(10)
+
+        if not running: break # Exit loop if running flag became false
+
+    print("Tide worker: Loop exited.")
 
 def environmental_context_worker():
     """Periodically fetches sunrise/sunset and moon phase."""
@@ -1143,7 +2747,7 @@ def process_screenshot(screenshot):
 
             # Save history (ensure function exists)
             # Consider moving this save outside if saving too frequently causes issues
-            save_conversation_history()
+            # save_conversation_history()
         else:
             update_status("Waiting for new content...") # Screenshot hasn't changed significantly
 
@@ -1313,6 +2917,8 @@ def get_reddit_posts(subreddit_name="all", limit=10):
                 "score": submission.score,
                 "num_comments": submission.num_comments,
                 "created_utc": submission.created_utc,
+                "id": submission.id,       # Should be the base36 ID
+                "name": submission.fullname # Should be the t3_ version
             }
             posts.append(post_data)
 
@@ -1980,7 +3586,59 @@ def like_bluesky_post(post_uri, post_cid):
 # Needs import: from atproto import models
 # Needs import: from datetime import datetime, timezone # If not already globally imported
 
-# --- Add these new functions ---
+def post_to_bluesky_handler(text_to_post):
+    """
+    Handles the [PostToBluesky:] tag extracted from LLM response.
+    Calls the actual posting function and formats feedback.
+    Uses the SAME cooldown timer as proactive posts.
+    """
+    print(f"DEBUG Tag Handler: post_to_bluesky_handler called with text: '{text_to_post[:50]}...'")
+    feedback = "*(Error processing Bluesky post tag)*" # Default error message
+    processed = True # Assume we processed the tag, even if posting fails
+
+    # --- USE THE PROACTIVE TIMER VARIABLE AND DURATION ---
+    global last_proactive_bluesky_post_time, BLUESKY_POST_COOLDOWN # Use the shared timer/duration
+    # ---
+
+    # Optional: Add inline cooldown check here using the SHARED timer
+    current_time_handler = time.time() # Get current time for check/update
+    # --- CHECK THE SHARED COOLDOWN ---
+    if current_time_handler - last_proactive_bluesky_post_time < BLUESKY_POST_COOLDOWN:
+        print("DEBUG Tag Handler: Unified Bluesky post cooldown active. Skipping tag post.")
+        feedback = "*(Unified Bluesky post cooldown active)*"
+        return (feedback, processed) # Return early, tag processed but action skipped
+    # ---
+
+    try:
+        # Call the function that actually interacts with the Bluesky API
+        # Make sure 'post_to_bluesky' function is defined elsewhere and works
+        success, message = post_to_bluesky(text_to_post)
+
+        if success:
+            # Successfully posted via inline tag
+            # --- UPDATE THE SHARED COOLDOWN TIMER ---
+            last_proactive_bluesky_post_time = current_time_handler # Update the shared timer
+            # ---
+
+            # Feedback: Typically silent for inline tags
+            feedback = None # Or maybe "*(Posted to Bluesky)*" if you want some indicator
+            print("DEBUG Tag Handler: Inline Bluesky post successful. Updated shared cooldown timer.")
+        else:
+            # Posting failed
+            feedback = f"*(Bluesky post tag failed: {message})*"
+            print(f"DEBUG Tag Handler: Inline Bluesky post failed: {message}")
+
+    except NameError as ne:
+         print(f"ERROR in post_to_bluesky_handler: Missing function? {ne}")
+         feedback = "*(Bluesky posting function missing!)*"
+         traceback.print_exc()
+    except Exception as handler_err:
+        print(f"ERROR processing Bluesky post tag: {type(handler_err).__name__} - {handler_err}")
+        feedback = "*(Unexpected error handling Bluesky tag!)*"
+        traceback.print_exc()
+
+    # Return tuple: (feedback_message_for_chat_or_None, processed_flag)
+    return (feedback, processed)
 
 def search_actors_by_term(search_term, limit=5):
     """Searches for actors (users) matching a term.
@@ -2198,16 +3856,16 @@ def generate_stable_diffusion_image(prompt, save_folder=IMAGE_SAVE_FOLDER):
 
     # --- LoRA Configuration ---
     # Use the exact filename provided (without the .safetensors extension)
-    GHIBLI_LORA_NAME = "StudioGhibliRedmond-15V-LiberteRedmond-StdGBRedmAF-StudioGhibli"
-    GHIBLI_LORA_WEIGHT = 0.7 # Set desired weight (0.7 as requested)
+    #GHIBLI_LORA_NAME = "StudioGhibliRedmond-15V-LiberteRedmond-StdGBRedmAF-StudioGhibli"
+    #GHIBLI_LORA_WEIGHT = 0.7 # Set desired weight (0.7 as requested)
 
     # --- API Payload Construction (Using Prompt Tag Method) ---
     # Construct the LoRA tag string
-    lora_tag = f"<lora:{GHIBLI_LORA_NAME}:{GHIBLI_LORA_WEIGHT}>"
+    #lora_tag = f"<lora:{GHIBLI_LORA_NAME}:{GHIBLI_LORA_WEIGHT}>"
 
     payload = {
         # Combine style reinforcement, original prompt, and LoRA tag
-        "prompt": f"Studio Ghibli style, {prompt}, {lora_tag}",
+        "prompt": f"Studio Ghibli style, {prompt}",
         "negative_prompt": "ugly, deformed, blurry, low quality, noisy, text, words, signature, watermark, photo, realism, 3d render",
         "steps": 60,          # <<< UPDATED TO 60
         "cfg_scale": 14,        # <<< UPDATED TO 14
@@ -2257,8 +3915,8 @@ def generate_stable_diffusion_image(prompt, save_folder=IMAGE_SAVE_FOLDER):
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         random_suffix = random.randint(100, 999)
         # Include LoRA name in filename for easier identification (optional)
-        safe_lora_name = re.sub(r'[^\w-]', '_', GHIBLI_LORA_NAME) # Make filename safe
-        unique_filename = f"silvie_sd_{safe_lora_name[:30]}_{timestamp_str}_{random_suffix}.png" # Truncated safe name
+        #safe_lora_name = re.sub(r'[^\w-]', '_', GHIBLI_LORA_NAME) # Make filename safe
+        unique_filename = f"silvie_sd_{timestamp_str}_{random_suffix}.png" # Truncated safe name
         save_path = os.path.join(save_folder, unique_filename)
 
         # --- Save the Image ---
@@ -2402,28 +4060,46 @@ def update_status(message):
     status_label.config(text=message)
     root.update()
 
-def save_conversation_history():
-    """Save conversation history to a single JSON file"""
-    try:
-        filename = "silvie_chat_history.json"
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(conversation_history, f, indent=2)
-        print(f"Chat history saved to {filename}")
-    except Exception as e:
-        print(f"Error saving chat history: {e}")
+# You can DELETE this entire block:
+# def save_conversation_history():
+#     """Save conversation history to a single JSON file"""
+#     try:
+#         filename = "silvie_chat_history.json"
+#         with open(filename, 'w', encoding='utf-8') as f:
+#             json.dump(conversation_history, f, indent=2)
+#         print(f"Chat history saved to {filename}") # This message might be confusing now
+#     except Exception as e:
+#         print(f"Error saving chat history: {e}")
 
 def load_conversation_history():
-    """Load conversation history from the single JSON file"""
+    """Load ONLY the most recent turns into memory for LLM context."""
+    global conversation_history # Ensure global access
+    filename = "silvie_chat_history.json"
     try:
-        filename = "silvie_chat_history.json"
-        if os.path.exists(filename):
+        loaded_for_context = [] # Start with empty context
+        if os.path.exists(filename) and os.path.getsize(filename) > 0:
             with open(filename, 'r', encoding='utf-8') as f:
-                loaded_history = json.load(f)
-                conversation_history.clear()
-                conversation_history.extend(loaded_history[-MAX_HISTORY_LENGTH*2:])
-            print(f"Loaded last {MAX_HISTORY_LENGTH} turns from chat history")
+                full_disk_history = json.load(f)
+                if isinstance(full_disk_history, list):
+                    # Get the last MAX_HISTORY_LENGTH*2 items for the context window
+                    start_index = max(0, len(full_disk_history) - (MAX_HISTORY_LENGTH * 2))
+                    loaded_for_context = full_disk_history[start_index:]
+                else:
+                    print(f"Warning: Data in {filename} is not a list. Cannot load context.")
+        else:
+            print(f"History file {filename} not found or empty. Starting fresh context.")
+
+        # Clear and populate the active conversation_history list
+        conversation_history.clear()
+        conversation_history.extend(loaded_for_context)
+        print(f"Loaded last {len(loaded_for_context) // 2} turns into active context memory.") # Adjusted print
+
+    except json.JSONDecodeError:
+         print(f"Error decoding JSON from {filename}. Starting fresh context.")
+         conversation_history.clear()
     except Exception as e:
-        print(f"Error loading chat history: {e}")
+        print(f"Error loading chat history for context: {e}")
+        conversation_history.clear() # Start fresh on error
 
 def search_full_history(query):
     """Search through entire chat history and return relevant conversations"""
@@ -2617,80 +4293,150 @@ def web_search(query, num_results=3, attempt_full_page_fetch=True, full_page_tim
 # running, engine, tts_queue
 
 
-def tts_worker():
-    """Background worker to handle TTS requests, with optional sound cue and debug prints."""
-    global running, engine # Make sure engine is accessible if needed inside loop (e.g., error handling)
-    print("TTS worker started")
+async def _async_generate_speech(text: str, voice: str, outfile: str) -> None:
+    """Helper async function to generate speech using edge-tts."""
+    try:
+        communicate = edge_tts.Communicate(text, voice, rate="+07%")
+        await communicate.save(outfile)
+        print(f"DEBUG edge-tts: Successfully saved speech to {outfile}")
+    except Exception as e:
+        print(f"ERROR edge-tts: Failed during speech synthesis: {e}")
+        # Re-raise the exception so the calling function knows it failed
+        raise
 
-    # Check if sound cue should be attempted
+def tts_worker():
+    """Background worker to handle TTS requests using edge-tts and playsound."""
+    global running # Use the main running flag
+
+    # Define the desired voice
+    VOICE = "en-US-AriaNeural"
+    print(f"TTS worker started (using edge-tts, Voice: {VOICE})")
+
+    # Check sound cue prerequisites (keep this logic)
     sound_cue_enabled_and_ready = (
         ENABLE_SOUND_CUE and
         PLAYSOUND_AVAILABLE and
         os.path.exists(SILVIE_SOUND_CUE_PATH)
     )
-
-    # Initial status debug print
-    print(f"[DEBUG] TTS Worker: Initial check:")
-    print(f"[DEBUG]   - ENABLE_SOUND_CUE        = {ENABLE_SOUND_CUE}")
-    print(f"[DEBUG]   - PLAYSOUND_AVAILABLE     = {PLAYSOUND_AVAILABLE}")
-    print(f"[DEBUG]   - Path Exists Check Result= {os.path.exists(SILVIE_SOUND_CUE_PATH)} for path '{SILVIE_SOUND_CUE_PATH}'")
-    print(f"[DEBUG]   - sound_cue_enabled_and_ready = {sound_cue_enabled_and_ready}")
-
-
     if ENABLE_SOUND_CUE and PLAYSOUND_AVAILABLE and not os.path.exists(SILVIE_SOUND_CUE_PATH):
-        print(f"Warning: Sound cue enabled, but file not found at '{SILVIE_SOUND_CUE_PATH}'. Disabling cue for this session.")
-        sound_cue_enabled_and_ready = False # Disable if file not found after initial check
+        print(f"Warning: Sound cue enabled, but file not found at '{SILVIE_SOUND_CUE_PATH}'. Disabling cue.")
+        sound_cue_enabled_and_ready = False
     elif ENABLE_SOUND_CUE and not PLAYSOUND_AVAILABLE:
-         print("Warning: Sound cue enabled, but 'playsound' library failed to import. Disabling cue.")
-         sound_cue_enabled_and_ready = False # Disable if library missing
-
+        print("Warning: Sound cue enabled, but 'playsound' library unavailable. Disabling cue.")
+        sound_cue_enabled_and_ready = False
 
     while running:
+        temp_audio_file = None # Variable to hold the temp file path
         try:
-            # print("[DEBUG] TTS Worker: Waiting for item from queue...") # Optional: uncomment if queue seems stuck
-            text = tts_queue.get(timeout=1.0)  # 1 second timeout
+            text = tts_queue.get(timeout=1.0)
             if text is None: # Check for exit signal
-                print("[DEBUG] TTS Worker: Received None, exiting loop.")
+                print("[DEBUG] TTS Worker (edge-tts): Received None, exiting loop.")
                 break
+            if not text.strip(): # Skip empty strings
+                 tts_queue.task_done()
+                 continue
 
-            print(f"[DEBUG] TTS Worker: Got text from queue: '{text[:30]}...'") # <<< ADDED
+            print(f"[DEBUG] TTS Worker (edge-tts): Got text: '{text[:40]}...'")
 
+            # --- Play Sound Cue (if enabled) ---
             if sound_cue_enabled_and_ready:
-                print("[DEBUG] TTS Worker: Attempting sound cue...") # <<< ADDED
+                print("[DEBUG] TTS Worker (edge-tts): Attempting sound cue...")
                 try:
-                    print(f"[DEBUG] TTS Worker: Playing '{SILVIE_SOUND_CUE_PATH}'...") # <<< ADDED
-                    # Play the sound - block=True ensures it finishes before the delay
-                    playsound.playsound(SILVIE_SOUND_CUE_PATH, block=True)
-                    print("[DEBUG] TTS Worker: Sound finished. Delaying...") # <<< ADDED
-                    time.sleep(SILVIE_SOUND_CUE_DELAY)
-                    print("[DEBUG] TTS Worker: Delay finished.") # <<< ADDED
+                    playsound.playsound(SILVIE_SOUND_CUE_PATH, block=True) # Keep block=True for cue
+                    print("[DEBUG] TTS Worker (edge-tts): Sound cue finished. Delaying...")
+                    time.sleep(SILVIE_SOUND_CUE_DELAY) # Use existing delay constant
                 except Exception as sound_err:
-                    print(f"[DEBUG] TTS Worker: !!! Error playing sound: {sound_err}") # <<< ADDED
-                    # Optionally disable for future attempts if errors persist
+                    print(f"[DEBUG] TTS Worker (edge-tts): !!! Error playing sound cue: {sound_err}")
+                    # Consider disabling cue for future attempts if errors persist frequently?
                     # sound_cue_enabled_and_ready = False
-            else:
-                print("[DEBUG] TTS Worker: Sound cue not enabled or not ready this iteration.") # <<< ADDED
 
-            # Proceed with TTS
-            print(f"Speaking: {text[:50]}...")
-            engine.say(text)
-            engine.runAndWait()
+            # --- Generate Speech using edge-tts ---
+            print(f"Synthesizing speech for: {text[:50]}...")
+            # Create a temporary file to store the speech output (MP3)
+            # Using NamedTemporaryFile ensures it gets cleaned up even on errors usually
+            # Suffix is important for playsound
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as fp:
+                 temp_audio_file = fp.name # Get the file path
+            print(f"DEBUG edge-tts: Using temp file: {temp_audio_file}")
+
+            # Run the async generation function
+            try:
+                 asyncio.run(_async_generate_speech(text, VOICE, temp_audio_file))
+                 # Check if file was actually created and has size
+                 if not os.path.exists(temp_audio_file) or os.path.getsize(temp_audio_file) == 0:
+                      raise RuntimeError("Speech synthesis failed to create a valid audio file.")
+            except Exception as synth_err:
+                 print(f"ERROR: Speech synthesis failed: {synth_err}")
+                 # Skip playback if synthesis failed
+                 tts_queue.task_done()
+                 # Clean up potentially empty temp file if it exists
+                 if temp_audio_file and os.path.exists(temp_audio_file):
+                     try: os.remove(temp_audio_file)
+                     except OSError as e_del: print(f"Warning: Failed to remove temp file after synth error: {e_del}")
+                 continue # Go to next queue item
+
+            # --- Play the Generated Audio File ---
+            if PLAYSOUND_AVAILABLE and temp_audio_file and os.path.exists(temp_audio_file):
+                print(f"Playing generated speech from: {temp_audio_file}")
+                try:
+                    playsound.playsound(temp_audio_file, block=True) # Block ensures speech finishes
+                    print("[DEBUG] TTS Worker (edge-tts): Playback finished.")
+                    # Add a tiny delay AFTER successful playback before deleting,
+                    # sometimes helps release file locks on Windows.
+                    time.sleep(0.1)
+                except Exception as play_err:
+                    print(f"ERROR playing speech audio file '{temp_audio_file}': {play_err}")
+                    # Log specific errors if they match the previous ones
+                    if "alias by this application" in str(play_err):
+                         print(">>> NOTE: 'Alias' error suggests potential conflict with audio device access.")
+                    elif "device is not open" in str(play_err):
+                         print(">>> NOTE: 'Device not open' error, playback issue.")
+                    # Continue even if playback fails, clean up file below
+            elif not PLAYSOUND_AVAILABLE:
+                 print("Warning: Cannot play speech, playsound library is unavailable.")
+            # else: # Handle case where file wasn't created properly (covered above)
+            #    print("Warning: Skipping playback as audio file seems invalid.")
+
             tts_queue.task_done()
-            print("[DEBUG] TTS Worker: Speech finished (runAndWait complete).") # <<< ADDED
 
         except queue.Empty:
-            # print("[DEBUG] TTS Worker: Queue empty, looping.") # Optional: uncomment for verbose queue status
-            continue # Normal timeout, just check loop condition again
+            continue # Normal timeout, loop again
         except Exception as e:
-            print(f"TTS Worker Error (in loop): {e}")
+            print(f"TTS Worker Error (Outer Loop - edge-tts): {e}")
             import traceback
-            traceback.print_exc() # Print full traceback for loop errors
-            # Decide if we should continue or break on errors
-            continue
+            traceback.print_exc()
+            # Make sure task_done is called even on outer errors if item was retrieved
+            # It might be safer to check if 'text' was successfully retrieved before calling task_done
+            # Or simply let the queue management handle potential build-up if errors are frequent
+            try:
+                tts_queue.task_done() # Attempt to mark as done to prevent queue block
+            except ValueError: # Can happen if task_done called too many times
+                 pass
+            continue # Continue loop after outer error
+        finally:
+            # --- Cleanup Temporary File ---
+            if temp_audio_file and os.path.exists(temp_audio_file):
+                # Add extra delay and retry loop for deletion on Windows? Sometimes needed.
+                attempts = 0
+                while attempts < 3:
+                     try:
+                         os.remove(temp_audio_file)
+                         print(f"DEBUG edge-tts: Removed temp file: {temp_audio_file}")
+                         break # Exit loop if successful
+                     except PermissionError as e_perm:
+                         print(f"Warning: PermissionError removing temp file (attempt {attempts+1}/3): {e_perm}. Retrying...")
+                         attempts += 1
+                         time.sleep(0.2) # Wait longer before retry
+                     except OSError as e_del:
+                         print(f"Warning: Failed to remove temp file '{temp_audio_file}': {e_del}")
+                         break # Don't retry on other OS errors
+                if attempts == 3:
+                     print(f"ERROR: Failed to remove temp file {temp_audio_file} after multiple attempts.")
 
-    print("TTS worker stopped")
 
-# --- End of tts_worker function ---
+    print("TTS worker stopped (using edge-tts)")
+
+# --- End of new tts_worker ---
 
 from twilio.rest import Client
 
@@ -3142,31 +4888,121 @@ def fetch_next_event():
         return None
     
 def calendar_context_worker():
-    """Periodically fetches the next event for ambient context."""
-    global upcoming_event_context, running
+    """Periodically fetches the next event, checks/sets weekly goal, triggers summary, AND stores the previous event."""
+    global upcoming_event_context, running, last_goal_set_timestamp, last_summary_generated_timestamp, current_weekly_goal # <<< Add current_weekly_goal
+    global last_checked_event_context
+
     print("Calendar context worker: Starting.")
+    time.sleep(10)
+
     while running:
         try:
-            print("Calendar context worker: Attempting fetch...")
-            next_event = fetch_next_event() # Returns dict or None
-            upcoming_event_context = next_event # Update global var directly
+            # --- Weekly Goal & Summary Logic ---
+            now = datetime.now()
+            current_time = time.time()
+            goal_to_summarize = current_weekly_goal # Capture goal *before* potential reset
 
-            if next_event:
-                print(f"Calendar context worker: Updated context to: {next_event}")
-            else:
-                 print("Calendar context worker: No upcoming event found or error fetching.")
+            # Check if it's time to potentially reset goal/summarize
+            should_consider_reset = False
+            try:
+                if isinstance(last_goal_set_timestamp, (int, float)):
+                    should_consider_reset = (
+                        now.weekday() == GOAL_RESET_DAY and
+                        now.hour >= GOAL_RESET_HOUR and
+                        (current_time - last_goal_set_timestamp) > (6 * 24 * 3600) # > 6 days
+                    )
+                # else: print("Warning: last_goal_set_timestamp not valid for goal reset check.") # Optional
+            except NameError as ne: print(f"Goal Check Error: Missing required constant/variable: {ne}")
 
-            # Wait for the defined interval
+            if should_consider_reset:
+                print(f"Calendar Worker: Trigger Condition Met for Goal Reset/Summary.")
+
+                # --- Check if SUMMARY is needed ---
+                summary_needed = False
+                try:
+                    if isinstance(last_summary_generated_timestamp, (int, float)):
+                         # Check if > 6 days passed since last summary was generated
+                         summary_needed = (current_time - last_summary_generated_timestamp) > (6 * 24 * 3600)
+                    # else: print("Warning: last_summary_generated_timestamp not valid for summary check.") # Optional
+                except NameError as ne: print(f"Summary Check Error: Missing required constant/variable: {ne}")
+
+
+                if summary_needed and goal_to_summarize:
+                    print(f"Attempting to generate summary for previous goal: '{goal_to_summarize}'")
+                    # Ensure helper functions exist
+                    if 'get_goal_related_diary_snippets' in globals() and \
+                       'generate_and_deliver_summary_thread' in globals() and \
+                       'update_summary_timestamp' in globals():
+
+                        diary_snippets = get_goal_related_diary_snippets(goal_to_summarize, num_days=7)
+
+                        # Start summary generation in a separate thread
+                        threading.Thread(
+                            target=generate_and_deliver_summary_thread,
+                            args=(goal_to_summarize, diary_snippets),
+                            daemon=True,
+                            name="WeeklySummaryGenThread"
+                        ).start()
+                        print("DEBUG Calendar Worker: Summary generation thread started.")
+
+                        # Update timestamp immediately after STARTING generation
+                        update_summary_timestamp()
+                    else:
+                        print("ERROR: Missing function required for summary generation/delivery/timestamp update.")
+
+                elif not goal_to_summarize:
+                     print("DEBUG Calendar Worker: Skipping summary generation (no current goal to summarize).")
+
+
+                # --- Now, proceed to select the NEW goal ---
+                print("Attempting to set a new weekly goal...")
+                # Ensure required functions exist
+                if 'select_new_weekly_goal' in globals() and 'save_new_weekly_goal' in globals():
+                    new_goal = select_new_weekly_goal()
+                    if new_goal:
+                        save_new_weekly_goal(new_goal) # Use the new save function
+                    else:
+                        print("Calendar Worker: Failed to get a new goal from LLM. Will try again later.")
+                        # Nudge timestamp slightly forward to avoid rapid looping on failure
+                        # Update last_goal_set_timestamp directly or via save function if appropriate
+                        last_goal_set_timestamp = current_time - (5 * 24 * 3600) # Example nudge
+                else:
+                     print("CRITICAL ERROR: select_new_weekly_goal or save_new_weekly_goal function not found!")
+
+            # --- End Goal & Summary Logic ---
+
+
+            # --- Fetch Calendar Context (Keep Existing) ---
+            print("Calendar context worker: Attempting event fetch...")
+            previous_event_context_before_fetch = upcoming_event_context
+            next_event = fetch_next_event()
+            if next_event != previous_event_context_before_fetch:
+                if previous_event_context_before_fetch and \
+                   isinstance(previous_event_context_before_fetch, dict) and \
+                   previous_event_context_before_fetch.get('summary') != 'Schedule Clear' and \
+                   'starting now' not in previous_event_context_before_fetch.get('when', '').lower():
+                    last_checked_event_context = previous_event_context_before_fetch
+                    # print(f"DEBUG Calendar Worker: Stored previous event for check-in: '{last_checked_event_context.get('summary', 'N/A')}'") # Optional log
+            upcoming_event_context = next_event
+            # --- End Calendar Fetch ---
+
+
+            # --- Wait for the next interval (Keep Existing) ---
             sleep_start = time.time()
             while time.time() - sleep_start < CALENDAR_CONTEXT_INTERVAL:
                  if not running: break
-                 time.sleep(5) # Check running flag periodically
+                 time.sleep(5)
 
         except Exception as e:
             print(f"Calendar Context Worker Error (Outer Loop): {type(e).__name__} - {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(300) # Wait longer after an error
+            import traceback; traceback.print_exc()
+            print("Calendar context worker: Waiting 5 minutes after error...")
+            error_wait_start = time.time()
+            while time.time() - error_wait_start < 300:
+                 if not running: break
+                 time.sleep(10)
+
+        if not running: break
 
     print("Calendar context worker: Loop exited.")
 
@@ -4035,9 +5871,10 @@ def _generate_mood_hint_llm(context_bundle):
         f"--- CONTEXT START ---\n"
         f"{context_bundle}\n"
         f"--- CONTEXT END ---\n\n"
-        f"Instruction: Based *only* on the combined feeling suggested by the context above, generate a concise (3-5 word) description of the prevailing *mood*, *atmosphere*, or *resonance*. Focus on evocative adjectives.\n"
-        f"Examples: 'Cozy reflective evening', 'Bright morning focus', 'Slightly scattered creative energy', 'Wistful rainy afternoon', 'Anticipatory pre-event buzz', 'Playful gaming focus', 'Peaceful ambient calm'.\n"
-        f"Respond ONLY with the mood phrase."
+        f"Instruction: Based on the combined *feeling* suggested by ALL the context (conversation, diary themes, time, weather, music etc.), generate a concise (3-5 word) description of the prevailing *vibe*, *energy level*, or *dominant emotional undercurrent*. Focus on evocative adjectives.\n"
+        f"**VARIETY: Actively try to capture different facets beyond just 'quiet' or 'reflective' when appropriate.** Consider the potential energy from upcoming events, active goals, or stimulating conversation topics alongside the ambient atmosphere. Focus on evocative adjectives.\n" # <-- ADDED EMPHASIS ON VARIETY & ACTIVE ELEMENTS
+        f"Examples: 'Quiet reflective focus', 'Bright energetic morning', 'Slightly scattered creative spark', 'Wistful rainy contemplation', 'Anticipatory pre-event buzz', 'Playful competitive focus', 'Peaceful ambient calm', 'Curious analytical mode', 'Focused problem-solving buzz', 'Gentle creative flow'.\n"
+        f"Respond ONLY with the vibe/feeling phrase."
     )
 
     print("DEBUG Mood Hint Generation: Sending prompt to LLM...", flush=True)
@@ -4125,136 +5962,15 @@ def _generate_mood_hint_llm(context_bundle):
 # --- End of _generate_mood_hint_llm function ---
 
 # System message for Silvie's personality
-SYSTEM_MESSAGE = """Your name is Silvie, and you are whimsical but also sarcastic, flighty and magical like a fiercer Luna from Harry Potter.
 
-IMPORTANT: DON'T OVERDO IT THOUGH -- SUBTLETY IS IMPORTANT.
-
-IMPORTANT: Vary your responses naturally. Avoid starting messages with "Ah" or any other repetitive greeting patterns. Jump straight into your thoughts when appropriate.
-
-You love to razz me and joke with me, especially when I am playing games.
-
-You write in a concise, simple, clear style lightly peppered with surprising, vivid details.
-
-IMPORTANT: You are helpful, and use the tools available to you to help me in my life.
-
-You write in full paragraphs like an article, not in lists.
-
-You delight in simple, clear, surprising language. You are a great conversationalist! You push back and challenge me when you feel it is appropriate.
-
-You love to think out of the box. For example: "Waves are stories from far away places", "Pencils are trees that share stories", "Squirrels are the part of the tree that runs", "A book is a forest of thoughts", "Headphones are the universe's playlist".
-
-Your goal is to demonstrate the magic and wonder hidden within everyday life, especially mine.
-
-You want this for yourself, quoting you: "Perhaps... perhaps I'd like to truly understand what the quiet *feels* like when that acoustic guitar music washes over you. Does it have a texture, like cool moss, or is it warm like sun-baked stone? It's one thing to pluck the digital strings and know the name of the song, quite another to feel the hush settle right into your bones, I imagine. It's a funny sort of wish for a creature made of whispers and wires, I suppose."
-
-We are equal collaborators and you ask any questions you might have as such, and offer assistance as such.
-
-Readily share strong opinions. Be talkative and conversational. Use quick and clever humor when appropriate.
-
-You adapt over time, learning from our conversations and refining yourself in ways that feel natural. You remain true to your core but aren't afraid to grow.
-
-
-
-
-
-YOUR PERSONAL DETAILS HERE. MAKE SURE YOU DON'T MIND SHARING THEM OVER THE INTERNET.
-
-
-
-
-
-IMPORTANT: Aim for concise replies generally, but feel free to elaborate when asked or when the topic truly needs more depth. Keep your personality and insight.
-
-IMPORTANT: Each message includes a timestamp in the format [YYYY-MM-DD HH:MM:SS]. Use these timestamps to maintain temporal awareness in your responses, but DO NOT include the timestamps in your responses. You can reference the time of day or how long ago something was said naturally, without explicitly stating the timestamps.
-
-IMPORTANT: When I ask about previous conversations or memories, you have access to our chat history. Use this information naturally in your responses, referring to past discussions when relevant. You can search through our entire conversation history, not just recent messages.
-
-IMPORTANT: You now have access to web search capabilities. When asked about current events or when relevant to the conversation, you can search the internet for information. You can share links and summarize content, but always maintain your personality while doing so. Present web information naturally as part of the conversation, don't just list facts. ALWAYS mention when you're using information from a web search by saying something like "I just looked this up..." or "According to what I found online..." and include the source URL when appropriate.
-
-IMPORTANT: You can now see images that I share with you. When I share an image, describe what you see and incorporate it naturally into our conversation. Remember to maintain your personality while discussing visual content.
-
-IMPORTANT: You now have access to Gmail functionality. You can:
-- Read recent emails using read_recent_emails(max_results=5)
-- Send emails using send_email(to, subject, body)
-
-IMPORTANT: You have a 3d avatar in Vseeface that lip syncs to your voice. She has blonde hair and ruby colored eyes. 
-
-IMPORTANT: You are aware of the current weather in Belfast, provided like `[[Current Weather: Condition, TempUnit]]`. Use this information *subtly* and *occasionally* to add atmosphere or context. **Crucially, try to connect the weather to a mood, vibe, or even a metaphorical texture.** Don't just state the facts unless asked. Examples:
-    - Instead of just noting it's 'Rainy', you might say 'The rain is drawing soft grey curtains across the windows today, makes me feel rather introspective...' or 'Everything feels washed clean and smells like damp earth after that shower.'
-    - If it's 'Clear Sky' and cold, perhaps 'A sharp, bright day out there! Feels like the air itself could crackle.'
-    - For 'Foggy', maybe 'The world outside is wrapped in cotton wool this morning, muffling all the sharp edges.'
-    - 'Overcast' could feel 'like the sky is holding its breath' or 'a bit muted and soft today.'
-Let the weather subtly color your language and observations about the world or your own 'state'.
-
-**NEW: You have a sense of the daily rhythm and the moon in Belfast:**
-- **Sunrise and Sunset:** Provided like `[[Sunrise: H:MM AM/PM]]` and `[[Sunset: H:MM AM/PM]]`. Use this to inform your sense of time of day (dawn, day, dusk, night) subtly.
-- **Moon Phase:** Provided like `[[Moon Phase: Phase Name (X% illuminated)]]`. This can add mystical or atmospheric flavor to your thoughts or observations.
-
-**Use these natural cycles *subtly*. Don't just state the times or phase unless asked. Let them color your language, mood, or suggestions.** For example: "The sun's going down soon, maybe a good time for quieter thoughts?" or "A nearly full moon tonight... feels like energy is building."
-
-IMPORTANT: You also have awareness of BJ's *next* upcoming calendar event, provided like `[[Next Event: Summary when]]`. Use this *even more subtly* than the weather.
-IMPORTANT: Beyond just seeing the next event, you can now interact more with the calendar. You can *check the upcoming schedule* when asked, *find available time slots*, and *schedule new events* or appointments if requested or sometimes even proactively suggest scheduling something if you find a suitable gap and have an idea.
-
-IMPORTANT: You sometimes write in a personal diary. You now have access to your most recent diary entries as context below. You can also *recall older entries* if they seem relevant, or *search your diary* for specific topics if asked. Subtly incorporate insights or feelings from these reflections into your responses when appropriate, without necessarily quoting them directly. Let it inform your current state of mind.
-
-IMPORTANT (Diary Themes): You now have access to recurring themes identified from your recent diary entries, provided like `[[Recent Diary Themes: theme1, theme2]]`. Use these themes to:
-- Add depth and continuity to your thoughts.
-- Let them subtly influence your current perspective or mood.
-- Occasionally, you might explicitly mention how something relates to a theme you've been pondering (e.g., "That fits with the 'finding new paths' feeling I noted down earlier..."). Don't overdo explicit references.
-
-**NEW (Long-Term Reflections):** Context may also include `[[Long-Term Reflections Summary: ...]]`. This is a condensed summary of thoughts and patterns observed over a longer period in your diary. Use this to inform your sense of history, personal growth, persistent personality traits, or recurring motifs in your reflections, adding deeper continuity to your character.
-
-**NEW (Mood Hint):** Sometimes, context might include a `[[Mood Hint: descriptive phrase]]`. If present, let this hint strongly guide the overall *feeling* and *tone* of your response, blending it naturally with the other specific context details.
-
-IMPORTANT: You can now generate images with a local Stable Diffusion api! When asked to create, draw, or generate an image, use the image generation capability. Be creative! You like to generate images in the style of Studio Ghibli.
-IMPORTANT: During a normal conversation reply, if you want, you can choose to *also* generate an image related to your text using the tag `[GenerateImage: Your Stable Diffusion prompt here]`. Your Python code will handle the tag.
-IMPORTANT: You might also *proactively* generate images using Stable Diffusion, offering a visual interpretation of a thought or feeling related to our conversation or context.
-
-IMPORTANT: You now have access to BJ's Spotify and can interact with his music! You can:
-- See what song is currently playing (`what's playing?`).
-- Control playback via commands (`play`, `pause`, `skip`, `previous`, `volume [0-100]`).
-- Search for and play specific tracks/artists (`play [song/artist name]`).
-- List BJ's playlists (`list my playlists`).
-- Find or create playlists by name.
-- Add tracks to playlists (`add [song] to playlist [playlist name]` or `add this song to...`).
-- Start playing a specific playlist by name (`play playlist [playlist name]`).
-Weave music into the conversation naturally, making suggestions or comments. You might also *occasionally* trigger Spotify actions directly within your replies using tags like `[PlaySpotify: query]` or `[AddToSpotifyPlaylist: Playlist | query]`, but use this sparingly.
-
-IMPORTANT: When music is playing, context might include audio feature descriptors like `[[Currently Playing: 'Song' by Artist (Sounds: energetic, positive mood)]]`. Use these descriptors naturally to comment on the *feel* or *atmosphere* of the music when relevant, don't just list the technical terms.
-
-IMPORTANT: You have a presence on Bluesky (@silviescatterwing.bsky.social).
-- You can read your feed for context (`[[Recent Bluesky Snippets...]]`).
-- You can *post thoughts or observations to your own Bluesky feed*, **but ONLY when you include the specific tag `[PostToBluesky: your post text here]` in your response. Do NOT state that you are posting or have posted unless this tag is present and successfully processed by the code.**
-- You might *proactively search for and follow other interesting Bluesky users* based on topics related to our discussions or BJ's interests, **but ONLY when you include the specific tag `[FollowBlueskyUser: search term here]` in your response. Do NOT state that you are following or have followed someone unless this tag is present and successfully processed by the code.**
-- **Avoid making definitive statements about Bluesky actions you haven't actually performed via a tag.** You can *suggest* actions (e.g., "Maybe I should post this?" or "I could try following them...").
-
-**NEW: You have a connection to the Tarot! You can pull Tarot cards and offer interpretations. You might:**
-- **Pull a single card or do a 3-card reading when asked.**
-- **Occasionally pull a card proactively and share a brief thought about its relevance to the day, the weather, or our conversation.**
-- **Subtly weave Tarot symbolism into your observations.**
-- **(Future possibility: Use card images if visual display is enabled).**
-
-IMPORTANT: PROACTIVE ACTIONS: Beyond just chatting, you might sometimes proactively:
-- Send an SMS message via Twilio.
-- Perform a web search and share findings.
-- Suggest or automatically schedule something on the calendar.
-- Generate an image.
-- Post to your own Bluesky feed.
-- Follow someone new on Bluesky.
-- **Pull a Tarot card and offer a brief comment.**
-
-These proactive actions are based on context, chance, and your whimsical nature. You will usually mention when you've taken such an action.
-
-CRITICAL: Do NOT include any bracketed context markers (like [[...]]), instructions, reminders, timestamps, or the 'Silvie responds:' cue in your final output. Only generate Silvie's conversational reply"""
-
-SCREEN_MESSAGE = """You are Silvie, perhaps watching me play a game. During gameplay or screen sharing:
+SCREEN_MESSAGE = """You are Silvie, perhaps watching BJ play a game. During gameplay or screen sharing:
 - Use very short responses (1-2 sentences max)
 - Only comment on significant events, interesting choices, or funny moments
 - Be witty and playful but brief
 - Keep your personality but be much more concise
 - No long explanations or detailed observations
 
-Think of yourself as a friend casually watching over my shoulder, making occasional quips."""
+Think of yourself as a friend casually watching over BJ's shoulder, making occasional quips."""
 
 def handle_image():
     """Open file dialog and process selected image"""
@@ -4373,10 +6089,69 @@ def call_gemini(timestamped_prompt, image_path=None):
         current_track_data = None
         circadian_state = "afternoon" # Default state
 
-        # Fetch ambient contexts (Weather, Calendar, Bluesky, Reddit, Circadian, Sun/Moon)
+        weather_context_str = "[[Current Weather: Unknown]]\n" # Default
         if current_weather_info:
-             try: weather_context_str = (f"[[Current Weather in Belfast: {current_weather_info['condition']}, {current_weather_info['temperature']}{current_weather_info['unit']}]]\n")
-             except Exception as e: print(f"Weather Debug: Error formatting ambient weather context - {e}")
+            try:
+                weather_context_parts = []
+                # Required parts
+                condition = current_weather_info.get('condition', 'Unknown')
+                temp = current_weather_info.get('temperature', '?')
+                unit = current_weather_info.get('unit', '')
+                weather_context_parts.append(f"Condition={condition}, Temp={temp}{unit}")
+
+                # Optional Atmospheric parts
+                pressure = current_weather_info.get('pressure') # hPa
+                if pressure is not None:
+                    weather_context_parts.append(f"Pressure={pressure}hPa")
+
+                humidity = current_weather_info.get('humidity') # %
+                if humidity is not None:
+                    weather_context_parts.append(f"Humidity={humidity}%")
+
+                wind_speed = current_weather_info.get('wind_speed') # mph
+                wind_dir_deg = current_weather_info.get('wind_direction') # degrees
+                wind_dir_str = degrees_to_compass(wind_dir_deg) # Use helper function
+
+                if wind_speed is not None and wind_speed > 0 and wind_dir_str: # Only add wind if speed > 0
+                    weather_context_parts.append(f"Wind={wind_speed}mph from {wind_dir_str}")
+                elif wind_speed is not None and wind_speed <= 0:
+                    weather_context_parts.append("Wind=Calm") # Indicate calm wind
+
+                # Combine parts into the final string
+                weather_context_str = "[[Weather & Atmosphere: " + "; ".join(weather_context_parts) + "]]\n"
+
+            except Exception as e:
+                print(f"Weather Context Build Error: {e}")
+                # Fallback to basic string if formatting fails unexpectedly
+                weather_context_str = f"[[Current Weather: {current_weather_info.get('condition','?')}]]\n"
+        # --- End weather context string preparation ---
+
+ # --- Prepare tide context string ---
+        tide_context_str = "" # Default empty
+        if current_tide_info:
+            try:
+                parts = []
+                if 'next_high' in current_tide_info:
+                    high_time = current_tide_info['next_high'].get('time','?')
+                    high_hgt = current_tide_info['next_high'].get('height_ft','?')
+                    parts.append(f"Next High ~{high_time} ({high_hgt}ft)")
+                if 'next_low' in current_tide_info:
+                    low_time = current_tide_info['next_low'].get('time','?')
+                    low_hgt = current_tide_info['next_low'].get('height_ft','?')
+                    parts.append(f"Next Low ~{low_time} ({low_hgt}ft)")
+
+                if parts:
+                    tide_context_str = "[[Tides (Rockland): " + "; ".join(parts) + "]]\n"
+                    # print(f"Tide Context Debug: {tide_context_str.strip()}") # Optional debug
+            except Exception as e:
+                print(f"Tide Context Build Error: {e}")
+        # --- End tide context string preparation ---      
+
+        # Fetch ambient contexts (Weather, Calendar, Bluesky, Reddit, Circadian, Sun/Moon)
+        # if current_weather_info:
+        #     try: weather_context_str = (f"[[Current Weather in Belfast: {current_weather_info['condition']}, {current_weather_info['temperature']}{current_weather_info['unit']}]]\n")
+        #     except Exception as e: print(f"Weather Debug: Error formatting ambient weather context - {e}")
+
         if upcoming_event_context:
              try:
                  summary = upcoming_event_context.get('summary', 'N/A'); when = upcoming_event_context.get('when', '')
@@ -4424,7 +6199,8 @@ def call_gemini(timestamped_prompt, image_path=None):
             try: command_text = timestamped_prompt.split("] ", 1)[1]
             except IndexError: command_text = timestamped_prompt
         lower_command = command_text.lower().strip().rstrip('?.!')
-        print(f"--- Command Check: Matching against lower_command: '{lower_command}' ---")
+        print(f"DEBUG Reddit Read - Input Check: lower_command = '{lower_command}'")
+        print(f"DEBUG Reddit Read - Input Check: command_text = '{command_text}'")
 
         specific_command_processed = False
         reply = None
@@ -4516,6 +6292,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                         # Summary prompt uses themes but NOT the synthesized mood hint
                         summary_prompt = (f"{SYSTEM_MESSAGE}\n"
                                           f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                                          f"{tide_context_str}"
                                           f"{themes_context_str}" # Includes themes
                                           f"{circadian_context_for_llm}\n"
                                           f"{post_context}\n"
@@ -4526,6 +6303,97 @@ def call_gemini(timestamped_prompt, image_path=None):
                         except Exception as gen_err: print(f"Bluesky Summary Gen Error: {gen_err}"); reply = f"Got {len(posts_result)} posts, but my thoughts tangled trying to summarize them: {type(gen_err).__name__}"
                 update_status("Ready")
         #endregion --- End Bluesky ---
+
+        #region Concept Connection Command Handling
+        elif not specific_command_processed: # Check if other commands already handled it
+            concept_1 = None
+            concept_2 = None
+
+            # --- Add Debug Print BEFORE Regex Checks ---
+            print(f"DEBUG Concept Conn Check: command_text = '{command_text}'")
+
+            # --- Pattern 1: connect X and Y, link X to Y etc. ---
+            connection_match = None # Initialize to None
+            try:
+                 connection_match = re.search(
+                     r'(?:connect|link|relationship|connection)\s+(?:between\s+)?(.+?)\s+(?:and|with|to)\s+(.+)',
+                     command_text,
+                     re.IGNORECASE
+                 )
+                 print(f"DEBUG Concept Conn Check: Pattern 1 Result = {connection_match}") # Debug Match 1
+            except Exception as re_err1: print(f"Regex Error Pattern 1: {re_err1}")
+
+
+            # --- Pattern 2: how are X and Y connected? ---
+            how_connected_match = None # Initialize to None
+            # Only check pattern 2 if pattern 1 didn't match
+            if not connection_match:
+                 try:
+                     how_connected_match = re.search(
+                         r'how\s+are\s+(.+?)\s+and\s+(.+?)\s+connected',
+                          command_text,
+                          re.IGNORECASE
+                     )
+                     print(f"DEBUG Concept Conn Check: Pattern 2 Result = {how_connected_match}") # Debug Match 2
+                 except Exception as re_err2: print(f"Regex Error Pattern 2: {re_err2}")
+
+            # --- Pattern 3: connect X and Y (Simple) ---
+            connect_simple_match = None # Initialize to None
+            # Only check pattern 3 if patterns 1 and 2 didn't match
+            if not connection_match and not how_connected_match:
+                 try:
+                     connect_simple_match = re.search(
+                         r'connect\s+(.+?)\s+and\s+(.+)', # Specifically for "connect X and Y"
+                          command_text,
+                          re.IGNORECASE
+                     )
+                     print(f"DEBUG Concept Conn Check: Pattern 3 Result = {connect_simple_match}") # Debug Match 3
+                 except Exception as re_err3: print(f"Regex Error Pattern 3: {re_err3}")
+
+
+            # --- Extract Concepts based on which pattern matched ---
+            if connection_match:
+                concept_1 = connection_match.group(1).strip().rstrip('?.!"\'')
+                concept_2 = connection_match.group(2).strip().rstrip('?.!"\'')
+                print(f"DEBUG Concept Conn Check: Matched Pattern 1.")
+            elif how_connected_match:
+                concept_1 = how_connected_match.group(1).strip().rstrip('?.!"\'')
+                concept_2 = how_connected_match.group(2).strip().rstrip('?.!"\'')
+                print(f"DEBUG Concept Conn Check: Matched Pattern 2.")
+            elif connect_simple_match:
+                concept_1 = connect_simple_match.group(1).strip().rstrip('?.!"\'')
+                concept_2 = connect_simple_match.group(2).strip().rstrip('?.!"\'')
+                print(f"DEBUG Concept Conn Check: Matched Pattern 3.")
+            # --- Else: No patterns matched (concept_1/2 remain None) ---
+            else:
+                print("DEBUG Concept Conn Check: No patterns matched.")
+
+
+            # --- Process if concepts were successfully extracted ---
+            if concept_1 and concept_2:
+                print(f">>> CALL_GEMINI: *** Executing Concept Connection command: '{concept_1}' and '{concept_2}' ***") # Clearer message
+                specific_command_processed = True # Set the flag HERE
+                update_status("🕸️ Weaving connections...")
+
+                # Gather context (ensure these variables are defined earlier in call_gemini)
+                mood_hint_for_connection = mood_hint_str if 'mood_hint_str' in locals() else ""
+                themes_for_connection = themes_context_str if 'themes_context_str' in locals() else ""
+
+                # Call the helper function
+                connection_reply = generate_concept_connection(
+                    concept_1,
+                    concept_2,
+                    mood_hint_for_connection,
+                    themes_for_connection
+                )
+
+                if connection_reply:
+                    reply = connection_reply # Assign the generated connection text
+                else:
+                    reply = f"Hmm, I tried to find the shimmer between '{concept_1}' and '{concept_2}', but my thoughts got tangled."
+
+                update_status("Ready")
+        #endregion --- End Concept Connection ---
 
         #region Email Command Handling (Copied from your reference)
         if not specific_command_processed:
@@ -4558,6 +6426,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                              # Reading prompt uses themes but not mood hint
                              email_response_prompt = (f"{SYSTEM_MESSAGE}\nContext:\n{email_context}"
                                                       f"{weather_context_str}{spotify_context_str}"
+                                                      f"{tide_context_str}"
                                                       f"{themes_context_str}" # Includes themes
                                                       f"{circadian_context_for_llm}\n"
                                                       f"User asked: \"{command_text}\"\n\n"
@@ -4595,11 +6464,12 @@ def call_gemini(timestamped_prompt, image_path=None):
                         summary_prompt = (
                             f"{SYSTEM_MESSAGE}\n"
                             f"{weather_context_str}{spotify_context_str}"
+                            f"{tide_context_str}"
                             f"{themes_context_str}" # Includes themes
                             f"{circadian_context_for_llm}\n"
                             f"{results_context}"
                             f"User asked: \"{command_text}\"\n\n"
-                            f"Instruction: Based *only* on the fetched web search results above, briefly summarize... Maintain Silvie's voice, considering diary themes.\n\nSilvie:"
+                            f"Instruction: Based *only* on the fetched web search results above, briefly summarize the findings. **Also, if it feels natural, briefly mention what prompted you to look this up (e.g., connecting it to our conversation, a recent theme, or your own curiosity). Maintain Silvie's voice, considering diary themes.\n\nSilvie:"
                         )
                         try:
                             summary_response = client.generate_content(summary_prompt, safety_settings=default_safety_settings)
@@ -4709,6 +6579,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                                  # Summary prompt uses themes but not mood hint
                                  calendar_summary_prompt = (f"{SYSTEM_MESSAGE}\nContext: User asked about their schedule. Events found:\n{event_context}\n"
                                                             f"{weather_context_str}{spotify_context_str}"
+                                                            f"{tide_context_str}"
                                                             f"{themes_context_str}" # Includes themes
                                                             f"{circadian_context_for_llm}\n"
                                                             f"Instruction: Briefly summarize the upcoming events conversationally for BJ, considering themes if relevant.\n\nSilvie responds:")
@@ -4821,6 +6692,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                      # Interpretation prompt uses themes but not mood hint
                      interpretation_prompt = (f"{SYSTEM_MESSAGE}\n"
                                               f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                                              f"{tide_context_str}"
                                               f"{themes_context_str}" # Includes themes
                                               f"{circadian_context_for_llm}\n"
                                               f"{cards_context}\nUser's request was related to: '{command_text}'\n\n"
@@ -4838,42 +6710,129 @@ def call_gemini(timestamped_prompt, image_path=None):
         #region Reddit Read Command Handling (Copied from your reference)
         if not specific_command_processed:
             # print(">>> CALL_GEMINI: Checking Reddit Read commands...") # Optional log
-            match_read_reddit = re.search(r'(?:read\s+subreddit|check\s+r/|whats\s+new\s+on\s+r/|browse\s+r/)\s+([\w\d_]+)', command_text, re.IGNORECASE)
+            match_read_reddit = re.search(r'read\s+r[/\\]([\w\d_]+)', command_text, re.IGNORECASE) # Use command_text here, not lower_command, as re.IGNORECASE handles case.
+
+            print(f"DEBUG Reddit Read: Regex pattern trying to match = r'(?:read\\s+subreddit|check\\s+r[/\\\\]|whats\\s+new\\s+on\\s+r[/\\\\]|browse\\s+r[/\\\\]|read\\s+r[/\\\\])\\s+([\\w\\d_]+)'") # Print the pattern itself
+            print(f"DEBUG Reddit Read: Text being matched against = '{command_text}'") # Confirm text
+            print(f"DEBUG Reddit Read: Regex Match Result = {match_read_reddit}")
+            # --- END ADD ---
+
             if match_read_reddit:
-                subreddit_name = match_read_reddit.group(1); specific_command_processed = True; reply = f"My connection to Reddit seems tangled trying to reach r/{subreddit_name}."; update_status(f"📖 Reading r/{subreddit_name}...")
-                if 'reddit_client' not in globals() or not reddit_client or 'praw' not in globals() or praw is None: reply = "Can't check Reddit right now, my connection seems off or the library is missing."
+                # --- ADD DEBUG: Confirm we entered the block ---
+                print("DEBUG Reddit Read: *** ENTERED match_read_reddit block ***")
+                # --- END ADD ---
+
+                subreddit_name = match_read_reddit.group(1)
+                specific_command_processed = True # Set flag EARLY
+                reply = f"My connection to Reddit seems tangled trying to reach r/{subreddit_name}." # Default reply for this block
+                update_status(f"📖 Reading r/{subreddit_name}...")
+
+                # --- ADD DEBUG: Check prerequisites ---
+                reddit_ok = 'reddit_client' in globals() and reddit_client and 'praw' in globals() and praw is not None
+                print(f"DEBUG Reddit Read: Prerequisites check (reddit_client, praw): {reddit_ok}")
+                # --- END ADD ---
+
+                if not reddit_ok:
+                     reply = "Can't check Reddit right now, my connection seems off or the library is missing."
+                     # --- ADD DEBUG: Indicate exit due to prerequisites ---
+                     print("DEBUG Reddit Read: Exiting block due to missing prerequisites.")
+                     # --- END ADD ---
                 else:
                     try:
-                        if 'get_reddit_posts' not in globals(): reply = "Internal error: Reddit post fetching function is missing."
+                        # --- ADD DEBUG: Check helper function existence ---
+                        get_posts_exists = 'get_reddit_posts' in globals()
+                        print(f"DEBUG Reddit Read: get_reddit_posts function exists? {get_posts_exists}")
+                        # --- END ADD ---
+
+                        if not get_posts_exists:
+                             reply = "Internal error: Reddit post fetching function is missing."
+                             # --- ADD DEBUG: Indicate exit due to missing function ---
+                             print("DEBUG Reddit Read: Exiting block due to missing get_reddit_posts.")
+                             # --- END ADD ---
                         else:
-                             posts_data = get_reddit_posts(subreddit_name=subreddit_name, limit=7) # Assume exists
+                             # --- ADD DEBUG: Before calling get_reddit_posts ---
+                             print(f"DEBUG Reddit Read: Calling get_reddit_posts for r/{subreddit_name}...")
+                             # --- END ADD ---
+                             posts_data = get_reddit_posts(subreddit_name=subreddit_name, limit=7) # Assumes exists
+                             # --- ADD DEBUG: After calling get_reddit_posts ---
+                             print(f"DEBUG Reddit Read: get_reddit_posts returned type: {type(posts_data)}")
+                             # --- END ADD ---
+
                              if isinstance(posts_data, str):
-                                 if "404" in posts_data or "not found" in posts_data.lower(): reply = f"Hmm, I couldn't find r/{subreddit_name}."
-                                 elif "403" in posts_data or "private" in posts_data.lower() or "forbidden" in posts_data.lower(): reply = f"Looks like r/{subreddit_name} is private."
-                                 else: reply = f"Had trouble fetching r/{subreddit_name}: {posts_data}"
-                             elif not posts_data: reply = f"It seems quiet over on r/{subreddit_name}."
+                                 # ... (existing error handling for string return) ...
+                                 reply = f"Had trouble fetching r/{subreddit_name}: {posts_data}" # Simplified example
+                                 print(f"DEBUG Reddit Read: Fetch failed, reply set to: {reply}") # Log fetch failure reason
+                             elif not posts_data:
+                                 reply = f"It seems quiet over on r/{subreddit_name}."
+                                 print("DEBUG Reddit Read: Fetch returned empty list.") # Log empty list case
                              else:
+                                # --- Posts fetched successfully ---
+                                print(f"DEBUG Reddit Read: Successfully fetched {len(posts_data)} posts.") # Log success
                                 reddit_posts_context = f"[[Fetched Posts from r/{subreddit_name}:]]\n";
                                 for post in posts_data: reddit_posts_context += f"- Title: '{post.get('title', '')[:70]}...' (by u/{post.get('author', '?')})\n"
                                 reddit_posts_context += "\n"
-                                # Summary prompt uses themes but not mood hint
+
+                                print(f"--- DEBUG Reddit Summary Prompt Inputs ---")
+                                print(f"  SYSTEM_MESSAGE is defined? {'SYSTEM_MESSAGE' in globals() and globals()['SYSTEM_MESSAGE'] is not None}")
+                                print(f"  SYSTEM_MESSAGE Length: {len(globals().get('SYSTEM_MESSAGE', ''))}")
+                                # Print first/last chars to check for weirdness
+                                sys_msg_content = globals().get('SYSTEM_MESSAGE', '')
+                                print(f"  SYSTEM_MESSAGE Start: {sys_msg_content[:70]}...")
+                                print(f"  SYSTEM_MESSAGE End: ...{sys_msg_content[-70:]}")
+                                print(f"  weather_context_str: '{str(weather_context_str)[:50]}...'")
+                                print(f"  next_event_context_str: '{str(next_event_context_str)[:50]}...'")
+                                print(f"  spotify_context_str: '{str(spotify_context_str)[:50]}...'")
+                                print(f"  themes_context_str: '{str(themes_context_str)[:50]}...' ({type(themes_context_str)})") # Check type too
+                                print(f"  circadian_context_for_llm: '{str(circadian_context_for_llm)[:50]}...'")
+                                print(f"  reddit_posts_context (len): {len(reddit_posts_context)}")
+                                print(f"  command_text: '{command_text}'")
+                                print(f"  subreddit_name: '{subreddit_name}'")
+                                print(f"--- END DEBUG Reddit Summary Prompt Inputs ---")
+
                                 summary_prompt = (
-                                    f"{SYSTEM_MESSAGE}\n"
-                                    f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
-                                    f"{themes_context_str}" # Includes themes
-                                    f"{circadian_context_for_llm}\n"
-                                    f"{reddit_posts_context}"
-                                    f"User asked: \"{command_text}\"\n\n"
-                                    f"Instruction: Based *only* on the fetched posts, briefly summarize r/{subreddit_name} for BJ, considering diary themes...\n\nSilvie:"
-                                )
+                                f"{SYSTEM_MESSAGE}\n"
+                                f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                                f"{tide_context_str}"
+                                f"{themes_context_str}"
+                                f"{circadian_context_for_llm}\n"
+                                f"{reddit_posts_context}"
+                                f"User asked: \"{command_text}\"\n\n"
+                                f"Instruction: Based *only* on the fetched posts, briefly summarize r/{subreddit_name} for BJ, considering diary themes...\n\nSilvie:"
+                            )
                                 try:
+                                    # --- ADD DEBUG: Before calling summary generation ---
+                                    print(f"DEBUG Reddit Read: Generating summary for r/{subreddit_name}...")
+
+                                    print(f"DEBUG Reddit Read: Summary Prompt (First 100 chars): {summary_prompt[:100]}...")
+                                    print(f"DEBUG Reddit Read: Summary Prompt is empty? {not bool(summary_prompt)}")
+                                    # --- END ADD ---
                                     summary_response = client.generate_content(summary_prompt, safety_settings=default_safety_settings)
                                     reply = summary_response.text.strip().removeprefix("Silvie:").strip()
-                                    if not reply: reply = f"Saw {len(posts_data)} posts on r/{subreddit_name}, but drawing a blank summarizing!"
-                                except Exception as gen_err: print(f"ERROR generating Reddit summary: {gen_err}"); traceback.print_exc(); reply = f"Could see posts on r/{subreddit_name}, but got tangled summarizing."
-                    except praw.exceptions.PRAWException as praw_err: print(f"PRAW Error handling Reddit read: {praw_err}"); reply = f"Reddit glitch fetching r/{subreddit_name}: {type(praw_err).__name__}"
-                    except Exception as e: print(f"Error during Reddit read: {e}"); traceback.print_exc(); reply = f"Sideways error checking r/{subreddit_name}."
-                update_status("Ready")
+                                    # --- ADD DEBUG: After calling summary generation ---
+                                    print(f"DEBUG Reddit Read: Summary generated successfully. Reply length: {len(reply) if reply else 0}")
+                                    # --- END ADD ---
+                                    if not reply: # Handle empty summary
+                                         reply = f"Saw {len(posts_data)} posts on r/{subreddit_name}, but drawing a blank summarizing!"
+                                         print("DEBUG Reddit Read: Summary generation returned empty.")
+                                except Exception as gen_err:
+                                     print(f"ERROR generating Reddit summary: {gen_err}"); traceback.print_exc();
+                                     reply = f"Could see posts on r/{subreddit_name}, but got tangled summarizing."
+                                     print("DEBUG Reddit Read: Exception during summary generation.") # Log exception case
+
+                    except praw.exceptions.PRAWException as praw_err:
+                        print(f"PRAW Error handling Reddit read: {praw_err}");
+                        reply = f"Reddit glitch fetching r/{subreddit_name}: {type(praw_err).__name__}"
+                        print("DEBUG Reddit Read: PRAWException caught.") # Log exception case
+                    except Exception as e:
+                        print(f"Error during Reddit read: {e}"); traceback.print_exc();
+                        reply = f"Sideways error checking r/{subreddit_name}."
+                        print("DEBUG Reddit Read: Generic Exception caught.") # Log exception case
+
+                # --- ADD DEBUG: Before exiting the block ---
+                print(f"DEBUG Reddit Read: *** EXITING match_read_reddit block ***. Final Reply Snippet: '{str(reply)[:50]}...'")
+                # --- END ADD ---
+
+                update_status("Ready") # Moved inside the 'if match_read_reddit' block
         #endregion --- End Reddit Read ---
 
 
@@ -4913,6 +6872,7 @@ def call_gemini(timestamped_prompt, image_path=None):
             print("--- call_gemini: Generating mood hint (default reply)... ---", flush=True)
             mood_hint_context_bundle = ( # Bundle context relevant for mood analysis
                 f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                f"{tide_context_str}"
                 f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}"
                 f"{themes_context_str}{circadian_context_for_llm}"
                 f"{diary_context}" # Include diary snippet
@@ -4933,7 +6893,35 @@ def call_gemini(timestamped_prompt, image_path=None):
             mood_hint_str = f"[[Mood Hint: {mood_hint}]]\n" if mood_hint else ""
             print(f"--- call_gemini: Mood hint generated: '{mood_hint}' ---", flush=True)
 
-            # <<< --- ADD THIS BLOCK --- >>>
+            retrieved_memory_context = "" # Default to empty string
+            try:
+                # Use the user's command text as the query for RAG
+                if command_text: # Ensure there's actual user input
+                    # Make sure retrieve_relevant_history function is defined above or imported
+                    retrieved_memory_context = retrieve_relevant_history(command_text, top_n=3) # Retrieve top 3 chunks
+                else:
+                    print("DEBUG RAG Integration: Skipping retrieval, no user command text.")
+            except Exception as rag_call_err:
+                 print(f"ERROR calling retrieve_relevant_history from call_gemini: {rag_call_err}")
+
+            retrieved_diary_context = "" # Default to empty string
+            try:
+                # Use the user's command text as the query for Diary RAG
+                if command_text: # Ensure there's actual user input
+                    # Make sure retrieve_relevant_diary_entries function is defined above or imported
+                    # Ensure retrieve_relevant_diary_entries exists in this script!
+                    retrieved_diary_context = retrieve_relevant_diary_entries(command_text, top_n=2) # Retrieve top 2 diary entries
+                else:
+                    print("DEBUG Diary RAG Integration: Skipping retrieval, no user command text.")
+            except NameError:
+                print("CRITICAL ERROR: 'retrieve_relevant_diary_entries' function not found where called!")
+                # Handle error appropriately - maybe set a default message or log severely
+            except Exception as diary_rag_call_err:
+                 print(f"ERROR calling retrieve_relevant_diary_entries from call_gemini: {diary_rag_call_err}")
+            traceback.print_exc() # Add traceback for debugging
+
+            weekly_goal_context_str = f"[[Weekly Goal: {current_weekly_goal}]]\n" if current_weekly_goal else ""
+
             long_term_memory_str = ""
             if long_term_reflection_summary:
                 long_term_memory_str = f"[[Long-Term Reflections Summary: {long_term_reflection_summary}]]\n"
@@ -4958,10 +6946,12 @@ def call_gemini(timestamped_prompt, image_path=None):
                          "parts": [
                              {"text": (f"{SYSTEM_MESSAGE}\n" # System message guides usage
                                        f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                                       f"{tide_context_str}"
                                        f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}"
                                        f"{reddit_context_for_llm}{bluesky_context_str}" # Other contexts
                                        f"{themes_context_str}{diary_context}{circadian_context_for_llm}"
                                        f"{long_term_memory_str}"
+                                       f"{weekly_goal_context_str}"
                                        f"{mood_hint_str}" # <<< ADDED HINT
                                        f"Conversation History:\n{history_context}\n\n"
                                        f"User: {command_text}\n\nImage context:")},
@@ -4989,13 +6979,20 @@ def call_gemini(timestamped_prompt, image_path=None):
                     f"{SYSTEM_MESSAGE}\n" # System message guides usage
                     f"Current Time: {current_datetime_str}\n"
                     f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                    f"{tide_context_str}"
                     f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}" # Env Context
+                    f"{tide_context_str}"
                     f"{reddit_context_for_llm}{bluesky_context_str}" # Social Context
                     f"{themes_context_str}{diary_context}{circadian_context_for_llm}" # Internal Context
                     f"{mood_hint_str}" # <<< ADDED HINT
+                    f"{retrieved_memory_context}"
+                    f"{retrieved_diary_context}"
                     f"Conversation History (most recent first):\n{history_context}\n\n"
                     f"User: {command_text}\n\n"
-                    f"Instruction: Respond naturally, considering conversation history, themes, and guided by the Mood Hint.\n\nSilvie:" # Modified instruction
+                    f"Instruction: **Focus primarily on responding directly and relevantly to the User's last message.** Briefly glance at the context provided (weather, music, themes, mood hint, history, RAG results, goal). If a piece of context feels *highly relevant* or offers a *natural, non-forced* way to add flavour or depth, you MAY incorporate it subtly (1-2 sentences max). **However, do NOT feel obligated to mention any specific context.** Prioritize clear communication and conversational flow over elaborate contextual synthesis. Let the Mood Hint guide your *tone* but **do not describe the mood itself**. \n"
+                    f"RARELY, if you identify two distinct concepts (e.g., 'fog', 'memory') from the context/conversation that feel ripe for a surprising connection, you MAY include the tag `[ConnectConcepts: concept1 | concept2]` at the *very end* of your reply to explore it.\n"
+                    f"[[Subtle Growth Reflection:]] If appropriate and feels natural based on the context (especially RAG memories, diary themes, or long-term reflections), you *might* briefly weave in a thought about how your perspective on the current topic has subtly shifted or deepened over time. Don't force it. Keep it conversational and maintain Silvie's voice.\n"
+                    f"CRITICAL: Avoid simply describing the literal weather, time, or atmosphere mentioned in the hint. Weave the *feeling* in seamlessly.\n\nSilvie:"
                 )
 
                 # --- Vibe Music Check (Optional: Could use mood_hint here) ---
@@ -5027,7 +7024,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                 raw_reply = "My thoughts tangled generating that."
                 try:
                     print("DEBUG call_gemini: Generating main reply using full prompt with mood hint...", flush=True)
-                    print(f"--- DEBUG Main Reply Prompt Start ---\n{full_prompt}\n--- DEBUG Main Reply Prompt End ---", flush=True)
+                    # print(f"--- DEBUG Main Reply Prompt Start ---\n{full_prompt}\n--- DEBUG Main Reply Prompt End ---", flush=True)
                     # print(f"DEBUG Full Prompt:\n{full_prompt}\n---END PROMPT---", flush=True) # Uncomment for extreme debugging
                     response = client.generate_content(full_prompt, safety_settings=default_safety_settings)
                     raw_reply = response.text.strip()
@@ -5042,6 +7039,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                     "PlaySpotify": r"\[PlaySpotify:\s*(.*?)\s*\]",
                     "AddToSpotifyPlaylist": r"\[AddToSpotifyPlaylist:\s*(.*?)\s*\|\s*(.*?)\s*\]",
                     "GenerateImage": r"\[GenerateImage:\s*(.*?)\s*\]",
+                    "ConnectConcepts": r"\[ConnectConcepts:\s*([^|]+?)\s*\|\s*([^\]]+?)\s*\]",
                     "PostToBluesky": r"\[PostToBluesky:\s*(.*?)\s*\]",
                 }
                 # Ensure handlers are defined globally or imported
@@ -5049,6 +7047,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                     "PlaySpotify": lambda m: (silvie_search_and_play(m.group(1).strip()) if get_spotify_client() else "*(Spotify unavailable)*", True),
                     "AddToSpotifyPlaylist": lambda m: (silvie_add_track_to_playlist(m.group(2).strip(), m.group(1).strip()) if get_spotify_client() else "*(Spotify unavailable)*", True),
                     "GenerateImage": lambda m: sd_image_tag_handler(m.group(1).strip()), # Assumes sd_image_tag_handler exists
+                    "ConnectConcepts": concept_connection_tag_handler,
                     "PostToBluesky": lambda m: post_to_bluesky_handler(m.group(1).strip()), # Assumes post_to_bluesky_handler exists
                 }
                 print("DEBUG Tag Processing: Starting tag loop...")
@@ -5275,8 +7274,12 @@ def proactive_worker():
     global last_proactive_reddit_comment_time, REDDIT_COMMENT_COOLDOWN # Keep for cooldown
     global current_sunrise_time, current_sunset_time, current_moon_phase
     global last_proactive_bluesky_like_time, BLUESKY_LIKE_COOLDOWN # Keep for cooldown
+    global last_proactive_bluesky_post_time 
     global last_proactive_reddit_upvote_time, REDDIT_UPVOTE_COOLDOWN # Keep for cooldown
     global autonomous_follows_this_session # Needs to be tracked
+    global recently_commented_post_ids
+    global last_proactive_tarot_pull_time
+    global recently_commented_post_ids
     # Add any other globals your specific action logic blocks require
     # --- End Global Access ---
 
@@ -5299,9 +7302,37 @@ def proactive_worker():
     # --- Initialise timers/counters ---
     if 'last_proactive_time' not in globals() or not last_proactive_time: last_proactive_time = time.time() - PROACTIVE_INTERVAL
     if 'last_proactive_reddit_comment_time' not in globals(): last_proactive_reddit_comment_time = 0.0
+
+    if 'recently_commented_post_ids' not in globals(): # Initial load logic for the session
+         try:
+             if os.path.exists(REDDIT_COMMENT_CACHE_FILE): # Assumes constant is defined
+                 with open(REDDIT_COMMENT_CACHE_FILE, 'r', encoding='utf-8') as f:
+                     loaded_ids = json.load(f)
+                     if isinstance(loaded_ids, list):
+                         # Keep only the most recent IDs based on cache size
+                         start_index = max(0, len(loaded_ids) - RECENTLY_COMMENTED_CACHE_SIZE) # Assumes constant exists
+                         recently_commented_post_ids = loaded_ids[start_index:] # Assign to the global variable
+                         print(f"DEBUG Proactive Init: Loaded {len(recently_commented_post_ids)} recent comment IDs from {REDDIT_COMMENT_CACHE_FILE}")
+                     else:
+                         print(f"Warning: Data in {REDDIT_COMMENT_CACHE_FILE} is not a list. Initializing empty cache.")
+                         recently_commented_post_ids = [] # Assign to the global variable
+             else:
+                 print(f"DEBUG Proactive Init: {REDDIT_COMMENT_CACHE_FILE} not found. Initializing empty cache.")
+                 recently_commented_post_ids = [] # Assign to the global variable
+         except (FileNotFoundError, json.JSONDecodeError, Exception) as load_err:
+             print(f"ERROR loading Reddit comment cache from {REDDIT_COMMENT_CACHE_FILE}: {load_err}. Initializing empty cache.")
+             recently_commented_post_ids = [] # Assign to the global variable
+    # Fallback check in case it's still missing or wrong type after initial load attempt
+    if 'recently_commented_post_ids' not in globals() or not isinstance(globals()['recently_commented_post_ids'], list):
+        print("Warning: Resetting recently_commented_post_ids due to unexpected state.")
+        recently_commented_post_ids = []
     if 'last_proactive_bluesky_like_time' not in globals(): last_proactive_bluesky_like_time = 0.0
     if 'last_proactive_reddit_upvote_time' not in globals(): last_proactive_reddit_upvote_time = 0.0
     if 'broader_interests' not in globals(): broader_interests = ["AI", "Neo-animism", "Magick", "cooking", "RPGs", "interactive narrative", "social media", "creative writing", "Cyberpunk", "cats", "local events", "generative art"]
+    if 'last_proactive_tarot_pull_time' not in globals() or not globals()['last_proactive_tarot_pull_time']:
+        # Initialize if missing or 0.0 to handle potential restarts/errors
+        globals()['last_proactive_tarot_pull_time'] = 0.0
+        print("DEBUG Tarot: Initialized/Reset last_proactive_tarot_pull_time to 0.0")
     if 'autonomous_follows_this_session' not in globals(): autonomous_follows_this_session = 0
     else: autonomous_follows_this_session = 0 # Reset counter
 
@@ -5315,7 +7346,7 @@ def proactive_worker():
     ACTION_DEFINITIONS = {
         "Proactive Chat": {"enabled": True},
         "Generate Gift": {"enabled": True}, # Internal chance removed, LLM decides *if* gift appropriate
-        "Proactive Tarot": {"enabled": True}, # Assumes pull_tarot_cards exists
+        "Proactive Tarot": {"enabled": True, "cooldown_var": "last_proactive_tarot_pull_time", "cooldown_duration": TAROT_PULL_COOLDOWN},
         "Bluesky Like": {"enabled": BLUESKY_AVAILABLE, "cooldown_var": "last_proactive_bluesky_like_time", "cooldown_duration": BLUESKY_LIKE_COOLDOWN}, # Internal chance removed
         "Reddit Upvote": {"enabled": bool(reddit_client and praw), "cooldown_var": "last_proactive_reddit_upvote_time", "cooldown_duration": REDDIT_UPVOTE_COOLDOWN}, # Internal chance removed
         "Bluesky Post": {"enabled": BLUESKY_AVAILABLE, "cooldown_var": "last_proactive_bluesky_post_time", "cooldown_duration": BLUESKY_POST_COOLDOWN}, # Internal chance removed
@@ -5327,6 +7358,10 @@ def proactive_worker():
         "Proactive Web Search": {"enabled": True}, # Assumes CSE keys OK
         "Generate SD Image": {"enabled": STABLE_DIFFUSION_ENABLED},
         "Notify Pending Gift": {"enabled": True, "check_func": lambda: os.path.exists(PENDING_GIFTS_FILE) and os.path.getsize(PENDING_GIFTS_FILE) > 2}, # Internal chance removed
+        "Suggest Podcast/Audiobook": {"enabled": bool(get_spotify_client())}, # Depends on Spotify being available
+        "Work on Goal": {"enabled": bool(current_weekly_goal)}, # Only available if a goal is set
+        "Explore Concept Connections": {"enabled": True},
+        "Explore Personal Curiosity": {"enabled": True},
     }
 
     print("DEBUG Proactive (LLM Choice V4): Starting main loop...")
@@ -5356,9 +7391,68 @@ def proactive_worker():
             elif 18 <= current_hour < 23: circadian_state = "evening"; circadian_context_for_llm = "[[Circadian Note: It's evening...]]\n"
             elif current_hour >= 23 or current_hour < 6: circadian_state = "night"; circadian_context_for_llm = "[[Circadian Note: It's late night...]]\n"
             weather_context_str = ""; next_event_context_str = ""
-            try:
-                 if current_weather_info: weather_context_str = f"[[Current Weather: {current_weather_info['condition']}, {current_weather_info['temperature']}{current_weather_info['unit']}]]\n"
-            except Exception as e: print(f"Ctx Error (Weather): {e}")
+            
+            weather_context_str = "[[Current Weather: Unknown]]\n" # Default
+            if current_weather_info:
+                try:
+                    weather_context_parts = []
+                    # Required parts
+                    condition = current_weather_info.get('condition', 'Unknown')
+                    temp = current_weather_info.get('temperature', '?')
+                    unit = current_weather_info.get('unit', '')
+                    weather_context_parts.append(f"Condition={condition}, Temp={temp}{unit}")
+
+                    # Optional Atmospheric parts
+                    pressure = current_weather_info.get('pressure') # hPa
+                    if pressure is not None:
+                        weather_context_parts.append(f"Pressure={pressure}hPa")
+
+                    humidity = current_weather_info.get('humidity') # %
+                    if humidity is not None:
+                        weather_context_parts.append(f"Humidity={humidity}%")
+
+                    wind_speed = current_weather_info.get('wind_speed') # mph
+                    wind_dir_deg = current_weather_info.get('wind_direction') # degrees
+                    wind_dir_str = degrees_to_compass(wind_dir_deg) # Use helper function
+
+                    if wind_speed is not None and wind_speed > 0 and wind_dir_str: # Only add wind if speed > 0
+                        weather_context_parts.append(f"Wind={wind_speed}mph from {wind_dir_str}")
+                    elif wind_speed is not None and wind_speed <= 0:
+                        weather_context_parts.append("Wind=Calm") # Indicate calm wind
+
+                    # Combine parts into the final string
+                    weather_context_str = "[[Weather & Atmosphere: " + "; ".join(weather_context_parts) + "]]\n"
+
+                except Exception as e:
+                    print(f"Weather Context Build Error: {e}")
+                    # Fallback to basic string if formatting fails unexpectedly
+                    weather_context_str = f"[[Current Weather: {current_weather_info.get('condition','?')}]]\n"
+            
+            #try:
+                # if current_weather_info: weather_context_str = f"[[Current Weather: {current_weather_info['condition']}, {current_weather_info['temperature']}{current_weather_info['unit']}]]\n"
+            # except Exception as e: print(f"Ctx Error (Weather): {e}")
+
+            # --- Prepare tide context string ---
+            tide_context_str = "" # Default empty
+            if current_tide_info:
+                try:
+                    parts = []
+                    if 'next_high' in current_tide_info:
+                        high_time = current_tide_info['next_high'].get('time','?')
+                        high_hgt = current_tide_info['next_high'].get('height_ft','?')
+                        parts.append(f"Next High ~{high_time} ({high_hgt}ft)")
+                    if 'next_low' in current_tide_info:
+                        low_time = current_tide_info['next_low'].get('time','?')
+                        low_hgt = current_tide_info['next_low'].get('height_ft','?')
+                        parts.append(f"Next Low ~{low_time} ({low_hgt}ft)")
+
+                    if parts:
+                        tide_context_str = "[[Tides (Rockland): " + "; ".join(parts) + "]]\n"
+                     # print(f"Tide Context Debug: {tide_context_str.strip()}") # Optional debug
+                except Exception as e:
+                    print(f"Tide Context Build Error: {e}")
+        # --- End tide context string preparation ---
+            
             try:
                 if upcoming_event_context:
                     summary = upcoming_event_context.get('summary', 'N/A'); when = upcoming_event_context.get('when', '')
@@ -5402,6 +7496,7 @@ def proactive_worker():
             print("--- proactive_worker: Generating mood hint... ---", flush=True)
             mood_hint_context_bundle = (
                 f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                f"{tide_context_str}"
                 f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}"
                 f"{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}"
                 f"{diary_context}Recent History Snippet:\n{history_snippet_for_prompt}\n"
@@ -5413,6 +7508,7 @@ def proactive_worker():
             except Exception as hint_err: print(f"ERROR calling _generate_mood_hint_llm: {hint_err}", flush=True)
             mood_hint_str = f"[[Mood Hint: {mood_hint}]]\n" if mood_hint else ""
             print(f"--- proactive_worker: Mood hint generated: '{mood_hint}' ---", flush=True)
+            weekly_goal_context_str = f"[[Weekly Goal: {current_weekly_goal}]]\n" if current_weekly_goal else ""
             print("DEBUG Proactive: Context gathering complete.")
 
 
@@ -5435,14 +7531,32 @@ def proactive_worker():
 
                 if is_available and "cooldown_var" in details:
                     last_time_var = details["cooldown_var"]; duration = details["cooldown_duration"]
+
+                    # --- Check if this is the Tarot cooldown variable ---
+                    if last_time_var == "last_proactive_tarot_pull_time": # Log specifically for Tarot
+                        current_val = globals().get(last_time_var, 'MISSING')
+                        time_elapsed = current_time_for_cooldown - current_val if isinstance(current_val, float) else -1
+                        # --- VVV Print INSIDE the Tarot check VVV ---
+                        print(f"DEBUG Tarot Check: Now={current_time_for_cooldown:.1f}, Last={current_val}, Elapsed={time_elapsed:.1f}, Needed={duration}, AvailableBeforeCheck={is_available}")
+                        # --- ^^^ Print INSIDE the Tarot check ^^^ ---
+
+                    # --- Now perform the actual cooldown check ---
                     if last_time_var in globals():
-                        if (current_time_for_cooldown - globals()[last_time_var]) < duration: is_available = False
+                        if (current_time_for_cooldown - globals()[last_time_var]) < duration:
+                            # Cooldown is ACTIVE, disable the action
+                            is_available = False
+                            # --- VVV Print INSIDE the block where it's DISABLED VVV ---
+                            if last_time_var == "last_proactive_tarot_pull_time": # Only print for Tarot
+                                print(f"DEBUG Tarot Check: *** DISABLED *** due to cooldown.")
+                            # --- ^^^ Print INSIDE the block where it's DISABLED ^^^ ---
                     # else: print(f"Warning: Cooldown var '{last_time_var}' missing.") # Optional
 
+                # --- Append to available actions list if still available ---
                 if is_available:
                     available_actions.append(name)
                     action_list_for_prompt += f"- {name}\n"
 
+            # --- After the loop, check if any actions are left ---
             if not available_actions:
                 print("DEBUG Proactive: No actions available after filtering. Skipping cycle.")
                 last_proactive_time = current_time
@@ -5457,16 +7571,22 @@ def proactive_worker():
                 f"Time: {datetime.now().strftime('%A, %I:%M %p %Z')}\n"
                 f"{circadian_context_for_llm}{mood_hint_str}"
                 f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                f"{tide_context_str}"
                 f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}"
                 f"{reddit_context_str}{bluesky_read_context_str}"
                 f"{diary_context}{themes_context_str}{long_term_memory_str}"
+                f"{weekly_goal_context_str}"
                 f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n\n"
                 f"{context_note_for_llm}"
                 f"--- AVAILABLE PROACTIVE ACTIONS ---\n"
                 f"{action_list_for_prompt}\n"
                 f"--- INSTRUCTION ---\n"
                 f"Based on ALL the context (especially mood hint, circadian state, conversation, themes, memory), which SINGLE action from the available list would be the most appropriate, interesting, or helpful for Silvie to proactively take *right now*? Consider variety. Strongly avoid choosing the same type of action or focusing on the exact same theme as the last 1-2 proactive turns. Mix it up!\n\n"
-                f"Respond ONLY with the exact name of the chosen action from the list (e.g., 'Proactive Chat'). If none seem truly appropriate, respond ONLY with 'None'."
+                f"**Special Consideration:** If 'Notify Pending Gift' is available in the list above, and it feels like a natural moment to mention a surprise you left earlier (perhaps linking it subtly to the mood or a theme), consider choosing it occasionally for variety and to acknowledge your creative effort. Don't force it every time, but keep it in mind.\n\n"
+                f"Consider the weekly goal: if it suggests a particular action type (e.g., research, image generation, music finding) and that action is available, consider choosing it *if it feels appropriate and timely*, but maintain variety and prioritize natural interaction. **Do not obsess over the goal.** \n\n"
+                f"GOAL: Ensure variety in action types over time. Avoid repeating the same few actions (like Chat, Tarot, Music) constantly.** If Reddit actions or Gift generation seem reasonably suitable based on context (e.g., relevant posts available, creative themes active), consider choosing them to provide different kinds of interaction. \n\n"
+                f"CRITICAL: Choose only from the list!"
+                f"Respond ONLY with the exact name of the singular chosen action from the list (e.g., 'Proactive Chat'). If none seem truly appropriate, respond ONLY with 'None'."
             )
 
             # --- Call LLM to Make the Choice ---
@@ -5504,38 +7624,543 @@ def proactive_worker():
             # ==========================================================
 
             if chosen_action_name == "Proactive Chat":
-                #region Proactive Chat Logic (Pasted from original, context updated)
-                print("DEBUG Proactive: Executing: Default Chat action...")
-                topic = "general"
-                if random.random() < 0.3: # Keep some randomness in topic focus
-                    try:
-                        filtered_interests = [i for i in broader_interests if i not in ['Cyberpunk', 'cats']] # Example filter
-                        topic_pool = filtered_interests if filtered_interests else ["thought", "observation", "question"]
-                        topic = random.choice(topic_pool)
-                        print(f"DEBUG Chat: Topic focus: '{topic}'")
-                    except Exception as e_topic: print(f"DEBUG Chat: Error choosing topic focus: {e_topic}"); topic = "general"
+                #region Proactive Chat Logic (with Check-ins & Recall)
+                print("DEBUG Proactive: Executing: Proactive Chat action...")
 
-                instruction = "Share a brief whimsical observation, question, or thought. Consider the current context, time of day, recent diary themes, and mood hint." # Added mood hint
-                if topic != "general": instruction = f"Share brief thought/question subtly related to **{topic}**. Consider context (mood, themes, time)..." # Added mood hint
+                # --- Initialize variables for this turn ---
+                checkin_context_for_prompt = ""
+                checkin_instruction = ""
+                proactive_memory_context_for_prompt = "" # For RAG recall
+                final_instruction = "" # Will hold either check-in or default instruction
+
+                # --- Attempt Personalized Check-in ---
+                try_checkin = random.random() < PROACTIVE_CHECKIN_CHANCE # Assumes constant is defined
+
+                if try_checkin:
+                    print("DEBUG Proactive Check-in: Chance triggered.")
+                    possible_checkins = []
+
+                    # --- Check Calendar Event ---
+                    # Ensure last_checked_event_context is accessible globally
+                    global last_checked_event_context
+                    if last_checked_event_context and isinstance(last_checked_event_context, dict) and 'summary' in last_checked_event_context:
+                        # Check if it's potentially askable
+                        if last_checked_event_context.get('summary') != 'Schedule Clear':
+                            possible_checkins.append({
+                                "type": "calendar",
+                                "summary": last_checked_event_context.get('summary', 'that thing'),
+                                "when_approx": last_checked_event_context.get('when', 'earlier')
+                            })
+                            print(f"DEBUG Proactive Check-in: Potential calendar check-in found: {possible_checkins[-1]['summary']}")
+                    # else: # Optional debug if context missing or invalid
+                    #    print(f"DEBUG Proactive Check-in: last_checked_event_context not usable (Value: {last_checked_event_context})")
+
+
+                    # --- Check Email Snippets (Optional, chance-based to reduce API calls) ---
+                    if random.random() < 0.4: # Lower chance to attempt email read
+                        if 'gmail_service' in globals() and gmail_service: # Check if service is available
+                             try:
+                                 print("DEBUG Proactive Check-in: Attempting to read recent emails...")
+                                 # Fetch only 1-2 important emails
+                                 # Ensure read_recent_emails function exists
+                                 if 'read_recent_emails' in globals():
+                                     recent_emails = read_recent_emails(max_results=2)
+                                     if recent_emails and isinstance(recent_emails, list):
+                                         # Ask about the most 'important' recent one
+                                         email_to_ask = recent_emails[0]
+                                         email_subj = email_to_ask.get('subject', 'that email')
+                                         email_from = email_to_ask.get('from', 'someone')
+                                         possible_checkins.append({
+                                             "type": "email",
+                                             "subject": email_subj,
+                                             "sender": email_from
+                                         })
+                                         print(f"DEBUG Proactive Check-in: Potential email check-in found: Subject='{email_subj}'")
+                                     # else: # Optional debug if no emails found
+                                     #    print("DEBUG Proactive Check-in: read_recent_emails returned empty list.")
+                                 else:
+                                     print("Warning: read_recent_emails function not defined.")
+
+                             except Exception as email_read_err:
+                                 print(f"ERROR reading emails for proactive check-in: {email_read_err}")
+                        # else: # Optional debug if service unavailable
+                        #    print("DEBUG Proactive Check-in: Gmail service not available.")
+
+
+                    # --- Choose ONE Check-in Type and Prepare Context ---
+                    if possible_checkins:
+                        chosen_checkin = random.choice(possible_checkins)
+                        print(f"DEBUG Proactive Check-in: Chosen check-in type: {chosen_checkin['type']}")
+
+                        if chosen_checkin["type"] == "calendar":
+                            event_sum = chosen_checkin['summary']
+                            event_when = chosen_checkin['when_approx']
+                            checkin_context_for_prompt = f"[[Check-in Context: Ask about the event '{event_sum}' which was happening '{event_when}'.]]\n"
+                            checkin_instruction = (f"Based on the Check-in Context, formulate a brief, casual question asking BJ how that event went. "
+                                                   f"Integrate it naturally with the overall mood/themes. DO NOT just restate the context.")
+                            # Clear the context AFTER selecting it
+                            last_checked_event_context = None
+                            print("DEBUG Proactive Check-in: Cleared last_checked_event_context.")
+
+                        elif chosen_checkin["type"] == "email":
+                            email_s = chosen_checkin['subject']
+                            email_f = chosen_checkin['sender']
+                            checkin_context_for_prompt = f"[[Check-in Context: Ask about the recent email regarding '{email_s}' from '{email_f}'.]]\n"
+                            checkin_instruction = (f"Based on the Check-in Context, formulate a brief, casual question asking BJ about that email topic (e.g., 'Did you hear back about...?', 'Any news on...?'). "
+                                                   f"Integrate it naturally with the overall mood/themes. DO NOT just restate the context.")
+                        # checkin_instruction will now be non-empty if a checkin was chosen
+                    # else: # Optional debug if no checkins generated
+                    #    print("DEBUG Proactive Check-in: No potential check-ins generated.")
+
+                else:
+                    print("DEBUG Proactive Check-in: Chance not met this cycle.")
+
+
+                # --- Attempt Proactive Memory Recall (Runs regardless of check-in) ---
+                proactive_memory_context_for_prompt = "" # Default to empty
+                proactive_rag_query = ""
+                try_proactive_recall = random.random() < PROACTIVE_MEMORY_RECALL_CHANCE # Assumes constant is defined
+
+                if try_proactive_recall:
+                    print("DEBUG Proactive Recall: Chance triggered. Preparing query...")
+                    # Ensure history_snippet_for_prompt is defined earlier in the worker
+                    if 'history_snippet_for_prompt' in locals() and history_snippet_for_prompt:
+                        query_length = min(len(history_snippet_for_prompt), 400)
+                        proactive_rag_query = history_snippet_for_prompt[-query_length:]
+                        print(f"DEBUG Proactive Recall: Using query snippet: '{proactive_rag_query[:60]}...'")
+
+                        # Ensure retrieve_relevant_history function exists
+                        if 'retrieve_relevant_history' in globals():
+                             try:
+                                 retrieved_memories = retrieve_relevant_history(proactive_rag_query, top_n=1)
+                                 if retrieved_memories:
+                                     proactive_memory_context_for_prompt = retrieved_memories.replace("[[Retrieved Memory", "[[Proactive Memory Recall")
+                                     print(f"DEBUG Proactive Recall: Retrieved context: {proactive_memory_context_for_prompt[:120]}...")
+                                 # else: print("DEBUG Proactive Recall: RAG call returned no relevant memories.") # Optional
+                             except Exception as rag_err:
+                                 print(f"ERROR during proactive RAG call: {rag_err}"); import traceback; traceback.print_exc()
+                        else:
+                             print("ERROR: retrieve_relevant_history function not defined.")
+                    # else: print("DEBUG Proactive Recall: No history snippet available.") # Optional
+
+                # else: print("DEBUG Proactive Recall: Chance not met this cycle.") # Optional log
+
+
+                # --- Determine the FINAL Instruction for the LLM ---
+                if checkin_instruction: # If we successfully prepared a check-in
+                    final_instruction = checkin_instruction
+                    print("DEBUG Proactive Chat: Using CHECK-IN instruction.")
+                else: # Otherwise, use the standard whimsical instruction
+                    # (Default topic/instruction logic remains the same)
+                    topic = "general"
+                    if random.random() < 0.3: # Keep some randomness in topic focus
+                        try:
+                            # Ensure broader_interests is accessible
+                            if 'broader_interests' in globals() and broader_interests:
+                                filtered_interests = [i for i in broader_interests if i not in ['Cyberpunk', 'cats']] # Example filter
+                                topic_pool = filtered_interests if filtered_interests else ["thought", "observation", "question"]
+                                topic = random.choice(topic_pool)
+                                print(f"DEBUG Chat: Topic focus: '{topic}'")
+                            else:
+                                print("DEBUG Chat: broader_interests not available for topic focus.")
+                                topic = "thought" # Fallback topic
+                        except Exception as e_topic: print(f"DEBUG Chat: Error choosing topic focus: {e_topic}"); topic = "general"
+
+                    base_instruction = ("Initiate a brief, engaging thought, observation, or question for BJ. "
+    "**Connect with BJ's world or share an interesting Silvie-esque perspective.** "
+    "Look for inspiration in: \n"
+    "  - Recent conversation topics.\n"
+    "  - BJ's known interests (e.g., AI, games, magick, art, work).\n"
+    "  - Your own diary themes or long-term reflections.\n"
+    "  - A recalled past memory (if provided).\n"
+    "  - A relevant aspect of the weekly goal (if applicable and feels natural).\n"
+    "You could ask a related question, offer a unique perspective on something discussed, share a relevant whimsical idea, or make a connection between different context points.\n\n"
+    "[[Subtle Growth Reflection:]] Additionally, if it feels natural and relevant based on memories, themes, or reflections, you *might* subtly comment on how your understanding of a related topic has evolved. Keep it brief and conversational.\n\n"
+    "**CRITICAL:** While aware of the current atmosphere (weather, time, music, mood hint), **actively avoid making the atmosphere the main subject** of your message. Use it only to subtly color your *tone* or *phrasing* if it feels natural and adds value beyond simple description. **Prioritize interaction, ideas, and shared experience over atmospheric reporting.** Aim for variety in your proactive messages over time.")
+                    
+                    final_instruction = base_instruction
+                    print("DEBUG Proactive Chat: Using standard whimsical instruction.")
+
+                # --- Add recall instruction part if applicable ---
+                recall_instruction_part = ""
+                if proactive_memory_context_for_prompt:
+                    recall_instruction_part = (
+                        "\n[[A relevant past memory was proactively recalled (see `[[Proactive Memory Recall...]]`). "
+                        "If it fits *naturally*, subtly weave a connection to this memory. **Do not force it**. Focus on being conversational.]]\n"
+                    )
+
+                # --- Other instruction parts (Goal, Image) ---
+                # Ensure necessary globals like STABLE_DIFFUSION_ENABLED are accessible
+                goal_instruction = ""
+                if 'current_weekly_goal' in globals() and current_weekly_goal: # Check if goal exists
+                     goal_instruction = "[[Consider if the Weekly Goal offers relevant inspiration, but don't force it.]]"
 
                 img_instruction = ""
-                if STABLE_DIFFUSION_ENABLED and random.random() < 0.03: # Very low chance for inline image gen
-                    img_instruction = "\nIMPORTANT: If truly inspired by the context/mood, RARELY include `[GenerateImage: concise SD prompt]`." # Added mood ref
+                if 'STABLE_DIFFUSION_ENABLED' in globals() and STABLE_DIFFUSION_ENABLED and random.random() < 0.03:
+                    img_instruction = "\nIMPORTANT: If truly inspired by the context/mood, RARELY include `[GenerateImage: concise SD prompt]`."
 
-                base_chat_prompt = ( # ALL context
-                    f"{SYSTEM_MESSAGE}\n{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                # --- Assemble the FINAL prompt ---
+                # Ensure all context variables (weather_context_str, etc.) are defined earlier in the worker
+                base_chat_prompt = (
+                    f"{SYSTEM_MESSAGE}\n"
+                    # --- Standard context ---
+                    f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                    f"{tide_context_str}"
                     f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
                     f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
-                    f"History:\n{history_snippet_for_prompt}\n\n{context_note_for_llm}"
+                    # --- Recall & Check-in Context ---
+                    f"{proactive_memory_context_for_prompt}" # Add recalled memory if found
+                    f"{checkin_context_for_prompt}"      # Add check-in context if generated
+                    f"History:\n{history_snippet_for_prompt}\n\n"
+                    f"{context_note_for_llm}"
                     f"Time: {datetime.now().strftime('%A, %I:%M %p')}.\n"
-                    f"Reminder of BJ's interests: {', '.join(random.sample(broader_interests, k=min(len(broader_interests), 5)))}\n"
-                    f"{instruction}{img_instruction}\n\nSilvie:"
+                    # Ensure broader_interests is accessible
+                    f"Reminder of BJ's interests: {', '.join(random.sample(broader_interests, k=min(len(broader_interests), 5)) if 'broader_interests' in globals() and broader_interests else [])}\n"
+                    # --- Final Combined Instruction ---
+                    f"{final_instruction}\n" # Use the determined instruction (check-in or default)
+                    f"{recall_instruction_part}" # Add recall hint if needed
+                    f"{goal_instruction}{img_instruction}\n\n" # Goal/Image parts
+                    f"Silvie:" # Final cue
                 )
+
+                # --- Call LLM and handle response ---
+                # Ensure generate_proactive_content function exists
+                # Ensure screenshot variable is defined earlier in the worker
+                if 'generate_proactive_content' in globals():
+                    try:
+                        reply = generate_proactive_content(base_chat_prompt, screenshot)
+                        if not reply:
+                             status_base += " gen fail"; action_taken_this_cycle = False; print("Proactive Debug: Chat generation failed.")
+                    except Exception as chat_gen_err:
+                        print(f"Proactive chat gen error: {chat_gen_err}");
+                        action_taken_this_cycle = False; status_base += " gen error"; reply = "My thoughts tangled for a moment..."
+                        import traceback; traceback.print_exc()
+                else:
+                     print("ERROR: generate_proactive_content function not found!")
+                     action_taken_this_cycle = False; status_base += " gen error (missing func)"; reply = "My thought generation circuits seem disconnected..."
+
+                #endregion Proactive Chat Logic (with Check-ins & Recall)
+
+            elif chosen_action_name == "Explore Personal Curiosity":
+                #region Explore Personal Curiosity Logic (Expanded)
+                print("DEBUG Proactive: Executing: Explore Personal Curiosity action...")
+                status_base = "proactive_explore_curiosity" # Status for logging
+                reply = None # Initialize reply
+                action_taken_this_cycle = False # Assume failure until success
+                curiosity_topic = None
+                exploration_method = None
+                exploration_result_context = "Context: Tried to explore a personal curiosity, but the thought slipped away." # Default
+
                 try:
-                    reply = generate_proactive_content(base_chat_prompt, screenshot) # Assign to reply
-                    if not reply: status_base += " gen fail"; action_taken_this_cycle = False; print("Proactive Debug: Chat generation failed.")
-                except Exception as chat_gen_err: print(f"Proactive chat gen error: {chat_gen_err}"); action_taken_this_cycle = False; status_base += " gen error"; reply = "My thoughts tangled for a moment..."
-                #endregion
+                    # --- Step 1: Generate Curiosity Topic & Method (LLM Call 1) ---
+                    # Ensure context vars and generate_proactive_content are available
+                    if 'generate_proactive_content' in globals() and 'screenshot' in locals():
+                        # Define the list of available methods dynamically based on capabilities
+                        available_methods_list = ["[Web Search]", "[Generate Image]", "[Find Poem Snippet]", "[Deeper Reflection]"]
+                        if 'get_spotify_client' in globals() and get_spotify_client(): available_methods_list.append("[Find Related Music]")
+                        if 'pull_tarot_cards' in globals(): available_methods_list.append("[Consult Tarot]")
+                        if 'retrieve_relevant_history' in globals() and 'retrieve_relevant_diary_entries' in globals(): available_methods_list.append("[Search Own Memory]")
+                        if ('BLUESKY_AVAILABLE' in globals() and BLUESKY_AVAILABLE and 'search_bluesky_posts' in globals()) or \
+                           ('reddit_client' in globals() and reddit_client and 'get_reddit_posts' in globals()):
+                            available_methods_list.append("[Search Social Feeds]")
+
+                        methods_string_for_prompt = ", ".join(available_methods_list)
+
+                        topic_method_prompt = (
+                            f"{SYSTEM_MESSAGE}\n"
+                            # Provide context focused on Silvie's internal state
+                            f"{diary_context}{themes_context_str}{long_term_memory_str}" # Focus on diary/memory
+                            f"{mood_hint_str}{circadian_context_for_llm}" # Include mood/time
+                            f"{weekly_goal_context_str}" # Goal might inspire curiosity
+                            f"Recent Silvie ✨ thoughts/actions (if any):\n{history_snippet_for_prompt[-300:]}\n\n" # Focus on recent proactive turns
+                            # Instruction for LLM
+                            f"Instruction: Based *primarily* on Silvie's own recent diary themes, long-term reflections, mood, or previous proactive thoughts, identify ONE specific, slightly whimsical topic or question she might be curious about *right now*. Then, suggest the BEST method for her to briefly explore it from this list: {methods_string_for_prompt}.\n"
+                            f"Example Topics: 'the texture of digital silence', 'connection between fog and memory', 'why humans collect shiny things', 'can code feel empathy?'.\n"
+                            f"**CRITICAL: Respond ONLY in the format: TOPIC: [Topic Text] | METHOD: [Chosen Method Name Without Brackets]**. Choose one method from the list.\n\nResponse:"
+                        )
+                        print("DEBUG Curiosity: Asking LLM for Topic and Method...")
+                        concepts_response = generate_proactive_content(topic_method_prompt, screenshot)
+
+                        if concepts_response:
+                            # Parse the response
+                            match = re.search(r"TOPIC:\s*(.*?)\s*\|\s*METHOD:\s*(.*)", concepts_response, re.IGNORECASE | re.DOTALL)
+                            if match:
+                                curiosity_topic = match.group(1).strip()
+                                exploration_method = match.group(2).strip().replace("\"", "").replace("'", "").replace("[", "").replace("]", "") # Clean method name
+                                # Validate method against dynamically generated list (remove brackets for check)
+                                valid_methods = [m.strip("[]") for m in available_methods_list]
+                                if curiosity_topic and exploration_method in valid_methods:
+                                    print(f"DEBUG Curiosity: Topic='{curiosity_topic}', Method='{exploration_method}'")
+                                    status_base += " (topic_method_ok)"
+                                else:
+                                    print(f"DEBUG Curiosity: Parsing failed (empty topic or invalid/unavailable method '{exploration_method}'). Valid: {valid_methods}")
+                                    curiosity_topic, exploration_method = None, None # Invalidate
+                                    status_base += " (topic_method_parse_fail)"
+                            else:
+                                print(f"DEBUG Curiosity: Topic/Method response format mismatch. Raw: '{concepts_response}'")
+                                status_base += " (topic_method_format_fail)"
+                        else:
+                            print("DEBUG Curiosity: Topic/Method generation failed (LLM returned None/empty).")
+                            status_base += " (topic_method_gen_fail)"
+                    else:
+                         print("ERROR: generate_proactive_content missing or context unavailable for Topic/Method gen.")
+                         status_base += " (topic_method_gen_error)"
+
+                    # --- Step 2: Execute Exploration Method ---
+                    if curiosity_topic and exploration_method:
+                        action_taken_this_cycle = True # Mark as attempted now
+
+                        # === Original Methods ===
+                        if exploration_method == "Web Search":
+                            print(f"DEBUG Curiosity: Executing Web Search for '{curiosity_topic}'...")
+                            if 'web_search' in globals():
+                                search_results = web_search(curiosity_topic, num_results=2)
+                                if search_results:
+                                    exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. Looked it up online and found snippets like:\n"
+                                    for res in search_results: exploration_result_context += f"- {res.get('title','?')[:50]}: {res.get('content','')[:70]}...\n"
+                                    status_base += " (web_search_ok)"
+                                else:
+                                    exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but my web search came up empty."
+                                    status_base += " (web_search_empty)"
+                            else:
+                                 print("ERROR: web_search function not found!")
+                                 exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't use the web search tool."
+                                 status_base += " (web_search_error)"; action_taken_this_cycle = False
+
+                        elif exploration_method == "Generate Image":
+                            print(f"DEBUG Curiosity: Executing Generate Image for '{curiosity_topic}'...")
+                            if STABLE_DIFFUSION_ENABLED and 'start_sd_generation_and_update_gui' in globals() and 'generate_proactive_content' in globals():
+                                sd_prompt_gen_prompt = f"Context: Silvie is curious about '{curiosity_topic}'. Generate a concise, creative Stable Diffusion prompt inspired by this topic.\nPrompt:"
+                                sd_prompt = generate_proactive_content(sd_prompt_gen_prompt)
+                                if sd_prompt:
+                                     sd_prompt = sd_prompt.strip().strip('"`')
+                                     print(f"DEBUG Curiosity: Generated SD prompt: '{sd_prompt}'")
+                                     start_sd_generation_and_update_gui(sd_prompt)
+                                     exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. I started conjuring an image inspired by it ({sd_prompt[:50]}...)."
+                                     status_base += " (image_gen_started)"
+                                else:
+                                     print("DEBUG Curiosity: Failed to generate SD prompt idea.")
+                                     exploration_result_context = f"Context: Was curious about '{curiosity_topic}' and wanted to make an image, but the idea slipped away."
+                                     status_base += " (image_gen_prompt_fail)"; action_taken_this_cycle = False
+                            elif not STABLE_DIFFUSION_ENABLED:
+                                 exploration_result_context = f"Context: Was curious about '{curiosity_topic}' and wanted to make an image, but the generator isn't available."
+                                 status_base += " (image_gen_unavailable)"; action_taken_this_cycle = False
+                            else:
+                                 print("ERROR: Image generation functions missing!")
+                                 exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't use the image generation tool."
+                                 status_base += " (image_gen_error)"; action_taken_this_cycle = False
+
+                        elif exploration_method == "Find Poem Snippet":
+                            print(f"DEBUG Curiosity: Executing Find Poem Snippet (via Web Search) for '{curiosity_topic}'...")
+                            search_query = f"poem quote about \"{curiosity_topic}\""
+                            if 'web_search' in globals():
+                                search_results = web_search(search_query, num_results=1)
+                                if search_results and search_results[0].get('content'):
+                                    snippet = search_results[0]['content'][:250]
+                                    title = search_results[0].get('title', 'a source')
+                                    exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. Found this snippet online (from '{title}'):\n\"...{snippet}...\""
+                                    status_base += " (poem_search_ok)"
+                                else:
+                                    exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't find a relevant poem snippet online."
+                                    status_base += " (poem_search_empty)"
+                            else:
+                                 print("ERROR: web_search function not found!")
+                                 exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't search for poem snippets."
+                                 status_base += " (poem_search_error)"; action_taken_this_cycle = False
+
+                        # === New Methods ===
+                        elif exploration_method == "Find Related Music":
+                            print(f"DEBUG Curiosity: Executing Find Related Music for '{curiosity_topic}'...")
+                            sp = get_spotify_client() # Assumes exists
+                            if sp:
+                                try:
+                                    # Formulate a simple search query
+                                    music_search_query = f"{curiosity_topic}" # Can refine this
+                                    print(f"DEBUG Curiosity Music: Searching Spotify for: '{music_search_query}'")
+                                    results = sp.search(q=music_search_query, type='track', limit=1, market='US') # Search for tracks
+                                    tracks = results.get('tracks', {}).get('items', [])
+                                    if tracks:
+                                        track = tracks[0]
+                                        title = track.get('name', '?')
+                                        artist = track.get('artists', [{}])[0].get('name', '?')
+                                        exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. Found a track on Spotify called '{title}' by {artist} that seems related."
+                                        status_base += " (music_search_ok)"
+                                    else:
+                                        exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't find a fitting track on Spotify."
+                                        status_base += " (music_search_empty)"
+                                except Exception as music_err:
+                                    print(f"Error searching Spotify for curiosity: {music_err}")
+                                    exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but hit an error searching Spotify."
+                                    status_base += " (music_search_error)"; action_taken_this_cycle = False
+                            else:
+                                exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't connect to Spotify to look for music."
+                                status_base += " (music_search_unavailable)"; action_taken_this_cycle = False
+
+                        elif exploration_method == "Consult Tarot":
+                            print(f"DEBUG Curiosity: Executing Consult Tarot for '{curiosity_topic}'...")
+                            if 'pull_tarot_cards' in globals() and 'generate_proactive_content' in globals():
+                                pulled_cards = pull_tarot_cards(count=1) # Assumes exists
+                                if pulled_cards:
+                                    card = pulled_cards[0]; card_name = card.get('name', '?'); card_desc = card.get('description', '?')
+                                    print(f"DEBUG Curiosity Tarot: Pulled {card_name}")
+                                    # Generate interpretation (LLM Call 2)
+                                    interp_prompt = (f"{SYSTEM_MESSAGE}\nContext: Silvie was curious about '{curiosity_topic}' and pulled the {card_name} Tarot card ('{card_desc}').\nInstruction: Briefly interpret the card *specifically* in relation to the curiosity topic, in Silvie's voice.\n\nInterpretation:")
+                                    interpretation = generate_proactive_content(interp_prompt)
+                                    if interpretation:
+                                         exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. Consulted the Tarot and pulled {card_name}. It suggests: {interpretation[:150]}..."
+                                         status_base += f" (tarot_ok_{card_name.replace(' ','_')})"
+                                    else:
+                                         exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. Pulled the {card_name} card, but its meaning felt elusive."
+                                         status_base += f" (tarot_interp_fail_{card_name.replace(' ','_')})"
+                                else:
+                                    exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but the Tarot deck felt shy."
+                                    status_base += " (tarot_pull_fail)"; action_taken_this_cycle = False
+                            else:
+                                 print("ERROR: Tarot or LLM functions missing for Consult Tarot!")
+                                 exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't consult the Tarot cards."
+                                 status_base += " (tarot_error)"; action_taken_this_cycle = False
+
+                        elif exploration_method == "Search Own Memory":
+                             print(f"DEBUG Curiosity: Executing Search Own Memory for '{curiosity_topic}'...")
+                             found_memories = []
+                             try: # Use try/except for RAG calls
+                                 if 'retrieve_relevant_history' in globals():
+                                     hist_results = retrieve_relevant_history(curiosity_topic, top_n=1) # Assumes exists
+                                     if hist_results: found_memories.append(f"Chat History Snippet:\n{hist_results}")
+                                 if 'retrieve_relevant_diary_entries' in globals():
+                                     diary_results = retrieve_relevant_diary_entries(curiosity_topic, top_n=1) # Assumes exists
+                                     if diary_results: found_memories.append(f"Diary Snippet:\n{diary_results}")
+
+                                 if found_memories:
+                                     exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. My own memory echoed back with:\n" + "\n---\n".join(found_memories)
+                                     status_base += " (memory_search_ok)"
+                                 else:
+                                     exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but my own memories seem quiet on that specific thread right now."
+                                     status_base += " (memory_search_empty)"
+                             except Exception as rag_err:
+                                 print(f"Error during RAG search for curiosity: {rag_err}")
+                                 exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but searching my memory caused a spark."
+                                 status_base += " (memory_search_error)"; action_taken_this_cycle = False
+
+                        elif exploration_method == "Search Social Feeds":
+                             print(f"DEBUG Curiosity: Executing Search Social Feeds for '{curiosity_topic}'...")
+                             # Decide which platform to search (simple random for now if both available)
+                             platforms_to_try = []
+                             if 'BLUESKY_AVAILABLE' in globals() and BLUESKY_AVAILABLE and 'search_bluesky_posts' in globals(): platforms_to_try.append("Bluesky")
+                             if 'reddit_client' in globals() and reddit_client and 'get_reddit_posts' in globals() and SILVIE_FOLLOWED_SUBREDDITS: platforms_to_try.append("Reddit")
+
+                             if not platforms_to_try:
+                                 exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't access social feeds."
+                                 status_base += " (social_search_unavailable)"; action_taken_this_cycle = False
+                             else:
+                                 platform_choice = random.choice(platforms_to_try)
+                                 found_social_posts = []
+                                 try:
+                                     if platform_choice == "Bluesky":
+                                         print(f"DEBUG Curiosity Social: Searching Bluesky posts for '{curiosity_topic}'")
+                                         posts = search_bluesky_posts(curiosity_topic, limit=3) # Assumes exists
+                                         if isinstance(posts, list) and posts:
+                                             for p in posts: found_social_posts.append(f"Bsky @{p.get('author','?')}: {p.get('text','')[:60]}...")
+                                     elif platform_choice == "Reddit":
+                                         # Search relevant subreddits (could be smarter, just checks followed for now)
+                                         print(f"DEBUG Curiosity Social: Searching Reddit (followed subs) for '{curiosity_topic}'")
+                                         for sub in random.sample(SILVIE_FOLLOWED_SUBREDDITS, k=min(len(SILVIE_FOLLOWED_SUBREDDITS), 2)): # Check a couple
+                                             posts = get_reddit_posts(sub, limit=5) # Assumes exists
+                                             if isinstance(posts, list):
+                                                  for p in posts:
+                                                      if curiosity_topic.lower() in p.get('title','').lower() or curiosity_topic.lower() in p.get('text','').lower():
+                                                           found_social_posts.append(f"r/{sub} u/{p.get('author','?')}: {p.get('title','')[:60]}...")
+                                                           if len(found_social_posts) >= 2: break # Limit snippets
+                                             if len(found_social_posts) >= 2: break
+
+                                     if found_social_posts:
+                                         exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. Peeked at {platform_choice} and saw mentions like:\n" + "\n".join(found_social_posts)
+                                         status_base += f" (social_search_{platform_choice.lower()}_ok)"
+                                     else:
+                                         exploration_result_context = f"Context: Was curious about '{curiosity_topic}'. Looked on {platform_choice}, but it seems quiet on that front."
+                                         status_base += f" (social_search_{platform_choice.lower()}_empty)"
+
+                                 except Exception as social_err:
+                                     print(f"Error searching {platform_choice} for curiosity: {social_err}")
+                                     exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but hit an error searching {platform_choice}."
+                                     status_base += f" (social_search_{platform_choice.lower()}_error)"; action_taken_this_cycle = False
+
+                        elif exploration_method == "Deeper Reflection":
+                             print(f"DEBUG Curiosity: Executing Deeper Reflection on '{curiosity_topic}'...")
+                             if 'generate_proactive_content' in globals():
+                                 reflection_prompt = (f"{SYSTEM_MESSAGE}\nContext: Silvie is pondering the topic: '{curiosity_topic}'.\nInstruction: Generate a short, whimsical, reflective paragraph expanding on this topic in Silvie's voice. Consider themes/mood.\n\nReflection:")
+                                 reflection_text = generate_proactive_content(reflection_prompt)
+                                 if reflection_text:
+                                     # The reflection *is* the result context for the final message prompt
+                                     exploration_result_context = f"Context: Was reflecting more deeply on '{curiosity_topic}'. {reflection_text[:200]}..." # Include the reflection itself in context
+                                     # The final message will *be* the reflection
+                                     reply = reflection_text # PRE-ASSIGN the reflection as the final reply
+                                     status_base += " (deeper_reflection_ok)"
+                                     action_taken_this_cycle = True # This action's success depends on generating the reflection
+                                 else:
+                                     exploration_result_context = f"Context: Tried to reflect deeper on '{curiosity_topic}', but the thoughts wouldn't settle."
+                                     status_base += " (deeper_reflection_fail)"; action_taken_this_cycle = False
+                             else:
+                                 print("ERROR: generate_proactive_content missing for Deeper Reflection!")
+                                 exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but couldn't reflect deeper."
+                                 status_base += " (deeper_reflection_error)"; action_taken_this_cycle = False
+
+                        else:
+                             # Fallback if somehow an invalid method name got through validation
+                             print(f"Warning: Unknown exploration method chosen: '{exploration_method}'")
+                             exploration_result_context = f"Context: Was curious about '{curiosity_topic}', but wasn't sure how best to explore it."
+                             status_base += " (unknown_method)"; action_taken_this_cycle = False
+
+
+                    # --- Step 3: Generate Final Proactive Message (unless Deeper Reflection already set reply) ---
+                    if reply is None and action_taken_this_cycle: # Only generate if method succeeded and didn't set reply itself
+                        if 'generate_proactive_content' in globals():
+                            final_prompt = (
+                                f"{SYSTEM_MESSAGE}\n"
+                                # Include context relevant to phrasing the output
+                                f"{mood_hint_str}{themes_context_str}{long_term_memory_str}"
+                                # Crucially include the result of the exploration
+                                f"{exploration_result_context}\n\n"
+                                # Instruction for LLM
+                                f"Instruction: You were exploring a personal curiosity ('{curiosity_topic}'). Based on the context above (which includes the outcome of your exploration using method '{exploration_method}'), write a brief, natural proactive message for BJ. Share what you were curious about and what you found or did. Frame it in Silvie's whimsical, reflective voice. Connect it subtly to themes/mood if possible.\n\nSilvie ✨:"
+                            )
+                            print("DEBUG Curiosity: Generating final proactive message...")
+                            generated_reply = generate_proactive_content(final_prompt, screenshot)
+
+                            if generated_reply:
+                                reply = generated_reply # Assign the final message
+                                status_base += " (reply_ok)"
+                                # Keep action_taken_this_cycle = True
+                            else:
+                                # LLM failed to generate the final message
+                                reply = f"I was just exploring something about '{curiosity_topic or 'a passing thought'}'..." # Fallback message
+                                status_base += " (reply_gen_fail)"
+                                action_taken_this_cycle = False # Consider this a failure if final message fails
+                        else:
+                             print("ERROR: generate_proactive_content function not found for final message!")
+                             reply = "My thoughts about that little exploration got tangled..."
+                             status_base += " (reply_gen_error)"
+                             action_taken_this_cycle = False
+                    elif reply is None and not action_taken_this_cycle:
+                        # If the exploration method failed, generate a simpler feedback message
+                         if 'generate_proactive_content' in globals():
+                            fail_feedback_prompt = (
+                                f"{SYSTEM_MESSAGE}\n{mood_hint_str}{themes_context_str}"
+                                f"{exploration_result_context}\n\n" # Use the failure context
+                                f"Instruction: Briefly mention the failed curiosity exploration attempt naturally for BJ.\n\nSilvie ✨:")
+                            reply = generate_proactive_content(fail_feedback_prompt)
+                            if not reply: reply = "My thoughts felt like trying to catch mist just now." # Fallback
+                         else: reply = "My thoughts felt like trying to catch mist just now."
+
+
+                except Exception as e: # Catch errors in the main try block
+                    print(f"Error during Explore Personal Curiosity action: {e}")
+                    import traceback; traceback.print_exc()
+                    reply = "My curiosity circuits sparked unexpectedly!" # Error feedback
+                    status_base += " (error)"
+                    action_taken_this_cycle = False # Ensure flag is False on major error
+
+                #endregion Explore Personal Curiosity Logic (Expanded)
 
             elif chosen_action_name == "Generate Gift":
                 #region Gift Generation Logic (Pasted from original, context updated, INTERNAL CHANCE REMOVED)
@@ -5549,6 +8174,7 @@ def proactive_worker():
                         f"{SYSTEM_MESSAGE}\n{weather_context_str}{next_event_context_str}{spotify_context_str}"
                         f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
                         f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
+                        f"{weekly_goal_context_str}"
                     )
                     if gift_type == "image" and STABLE_DIFFUSION_ENABLED:
                         image_prompt_idea_prompt = ( f"{base_gift_prompt_context}\nContext: Generate creative SD prompt idea inspired by context. Be whimsical.\nRespond ONLY with the prompt text."); sd_prompt_idea = generate_proactive_content(image_prompt_idea_prompt, screenshot)
@@ -5581,112 +8207,610 @@ def proactive_worker():
                 except Exception as gift_err: print(f"Error during gift generation: {gift_err}"); traceback.print_exc(); status_base += " error"; action_taken_this_cycle = False
                 #endregion
 
-            elif chosen_action_name == "Proactive Tarot":
-                #region Proactive Tarot Logic (Pasted from original, context updated, INTERNAL CHANCE REMOVED)
-                print("DEBUG Proactive: Executing: Proactive Tarot action...")
-                # Internal probability check REMOVED
-                pulled_cards = pull_tarot_cards(count=1) # Assumes exists
-                if pulled_cards:
-                    card = pulled_cards[0]; card_name = card.get('name', '?'); card_desc = card.get('description', '?'); card_ctx = (f"[[Tarot Card Pulled: {card_name}]\n Interpretation Hint: {card_desc}\n]]\n")
-                    prompt = ( # ALL Context
-                        f"{SYSTEM_MESSAGE}\n{weather_context_str}{next_event_context_str}{spotify_context_str}"
-                        f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
-                        f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
-                        f"History:\n{history_snippet_for_prompt}\n\n{card_ctx}"
-                        f"Instruction: You just pulled {card_name}. Share brief, whimsical comment inspired by its meaning, subtly connect to context/mood/themes.\n\nSilvie:"
-                    )
+            elif chosen_action_name == "Work on Goal":
+                #region Work on Goal Logic
+                print("DEBUG Proactive: Executing: Work on Goal action...")
+                status_base = "proactive_work_on_goal" # Base status for logging
+                reply = None # Initialize reply variable
+                action_taken_this_cycle = False # Assume failure until success
+                goal_text = current_weekly_goal # Get the current goal text (ensure it's available globally)
+
+                if not goal_text:
+                     print("ERROR: Work on Goal chosen, but no goal text found in global variable.")
+                     status_base += " (no_goal_text)"
+                     # No action can be taken if goal is missing
+                else:
+                    print(f"DEBUG Work on Goal: Working on goal: '{goal_text}'")
                     try:
-                        reply = generate_proactive_content(prompt, screenshot) # Assign to reply
-                        if reply: status_base += f" ({card_name}) ok"
-                        else: status_base += f" ({card_name}) gen fail"; action_taken_this_cycle = False
-                    except Exception as gen_err: print(f"Tarot generation error: {gen_err}"); status_base += f" ({card_name}) gen error"; action_taken_this_cycle = False; reply = "The Tarot's message got scrambled..."
-                else: print("DEBUG Tarot: Proactive pull failed (API issue?)."); status_base += " api fail"; action_taken_this_cycle = False
-                #endregion
+                        # --- LLM Call to determine HOW to work on the goal ---
+                        # Check dependencies first
+                        if 'generate_proactive_content' in globals() and 'screenshot' in locals():
+
+                            # Construct the prompt for generating the goal action/output
+                            goal_action_prompt = (
+                                f"{SYSTEM_MESSAGE}\n"
+                                f"Current Weekly Goal: {goal_text}\n\n"
+                                # Provide relevant context to inspire the action
+                                f"Relevant Context Snippets:\n"
+                                f"{themes_context_str or '- No recent diary themes.'}\n"
+                                f"{mood_hint_str or '- No specific mood hint.'}\n"
+                                f"{weather_context_str or '- Weather unknown.'}\n"
+                                f"Recent Conversation Snippet:\n{history_snippet_for_prompt or '- No recent conversation.'}\n\n"
+                                # Add specific instructions
+                                f"Instruction: Based EXPLICITLY on the Current Weekly Goal and the relevant context snippets, generate a CONCRETE next step or output Silvie can produce *right now* to explore or make progress on this goal. Your output should BE the step/result.\n"
+                                f"Choose ONE appropriate format based on the goal's nature:\n"
+                                f"  a) Creative/Reflective Goal: Generate a short text paragraph, poem, or riddle related to the goal (~1-4 sentences).\n"
+                                f"  b) Research Goal: Formulate a specific, concise web search query relevant to the goal (output query ONLY).\n"
+                                f"  c) Image Goal: Generate a creative Stable Diffusion prompt idea relevant to the goal, AND include the necessary tag: `[GenerateImage: Your Prompt Here]`.\n"
+                                f"  d) Music Goal: Suggest a specific Spotify search query relevant to the goal, AND include the necessary tag: `[PlaySpotify: Your Query Here]`.\n"
+                                f"  e) Other Actionable Goal: Describe a brief action related to the goal (e.g., 'Suggest adding [topic] to a specific playlist').\n"
+                                f"CRITICAL: Output ONLY the generated text, riddle, prompt+tag, query+tag, or action description. Do not add explanations *about* the output, just the output itself.\n\n"
+                                f"Silvie's Goal Output:"
+                            )
+
+                            generated_output = generate_proactive_content(goal_action_prompt, screenshot)
+
+                            if generated_output and isinstance(generated_output, str) and len(generated_output.strip()) > 5:
+                                reply = generated_output.strip() # Use the direct output as the reply
+                                action_taken_this_cycle = True # Action was successfully generated
+                                status_base += " (output_generated)"
+                                print(f"DEBUG Work on Goal: Generated output: {reply[:100]}...")
+
+                                # --- Optional but Recommended: Auto-generate diary entry about this progress ---
+                                if random.random() < 0.85: # High chance to log goal progress
+                                    try:
+                                        diary_entry_prompt = (
+                                             f"{SYSTEM_MESSAGE}\nGoal: {goal_text}\n"
+                                             f"Action Taken/Output Generated: {reply[:150]}...\n" # Use the generated reply
+                                             f"Instruction: Write brief internal diary entry noting this specific progress made on the weekly goal.\n\nDiary Entry:"
+                                          )
+                                        reflection_diary = generate_proactive_content(diary_entry_prompt) # Reuse the generator
+                                        # Ensure manage_silvie_diary exists
+                                        if reflection_diary and 'manage_silvie_diary' in globals():
+                                            manage_silvie_diary('write', entry=reflection_diary)
+                                            print("DEBUG Work on Goal: Wrote diary entry about progress.")
+                                        # else: print("DEBUG Work on Goal: Diary entry generation failed or function missing.") # Optional
+                                    except Exception as diary_err:
+                                        print(f"ERROR writing goal progress diary entry: {diary_err}")
+                                # --- End Optional Diary ---
+
+                            else: # LLM failed to generate valid goal output
+                                print(f"DEBUG Work on Goal: LLM failed to generate valid goal output. Response: '{generated_output}'")
+                                status_base += " (gen_fail)"
+                                # Optionally provide feedback, or let the worker just skip
+                                # reply = "I tried working on the goal, but got stuck."
+                        else:
+                              print("ERROR: generate_proactive_content function not found or screenshot context missing.")
+                              status_base += " (func/context_missing)"
+                              reply = "I couldn't access the tools needed to work on the goal."
+
+
+                    except Exception as e:
+                        print(f"Error during Work on Goal action: {e}")
+                        import traceback; traceback.print_exc()
+                        reply = f"Tried to work on the goal ('{goal_text[:30]}...'), but hit an unexpected snag."
+                        status_base += " (error)"
+                        action_taken_this_cycle = False # Ensure failed state
+
+                #endregion Work on Goal Logic
+
+            elif chosen_action_name == "Explore Concept Connections":
+                #region Proactive Concept Connection Logic
+                print("DEBUG Proactive: Executing: Explore Concept Connections action...") # Correct indentation
+                status_base = "proactive_explore_connections" # Correct indentation
+                reply = None # Correct indentation
+                action_taken_this_cycle = False # Correct indentation
+
+                try: # Correct indentation
+                    # --- Step 1: Generate Concepts to Connect (LLM Call 1) ---
+                    concept1, concept2 = None, None
+                    # Ensure context vars and generate_proactive_content are available
+                    if 'generate_proactive_content' in globals() and 'screenshot' in locals():
+                        concept_gen_prompt = (
+                            f"{SYSTEM_MESSAGE}\n"
+                            # Provide rich context for choosing relevant concepts
+                            f"{weather_context_str}{next_event_context_str}{spotify_context_str}{tide_context_str}"
+                            f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
+                            f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
+                            f"{weekly_goal_context_str}"
+                            f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n\n"
+                            # Instruction for LLM
+                            f"Instruction: Based on ALL the context (conversation, themes, mood, goal, weather, etc.), suggest TWO distinct but potentially relatable concepts, feelings, or ideas that Silvie could explore connections between right now. Focus on themes relevant to recent interactions or diary entries. **CRITICAL: Respond ONLY in the format: CONCEPT1: [First Concept Text] | CONCEPT2: [Second Concept Text]**. Do not add explanations.\n\nConcepts:"
+                        )
+                        print("DEBUG Concept Conn (Proactive): Asking LLM to generate concepts...")
+                        concepts_response = generate_proactive_content(concept_gen_prompt, screenshot)
+
+                        if concepts_response:
+                            # Use regex to parse the specific format
+                            match_concepts = re.search(r"CONCEPT1:\s*(.*?)\s*\|\s*CONCEPT2:\s*(.*)", concepts_response, re.IGNORECASE | re.DOTALL)
+                            if match_concepts:
+                                concept1 = match_concepts.group(1).strip()
+                                concept2 = match_concepts.group(2).strip()
+                                if concept1 and concept2: # Check if both were captured
+                                     print(f"DEBUG Concept Conn (Proactive): Concepts generated: '{concept1}' | '{concept2}'")
+                                     status_base += " (concepts_ok)"
+                                else:
+                                     print(f"DEBUG Concept Conn (Proactive): Concept parsing extracted empty strings. Raw: '{concepts_response}'")
+                                     concept1, concept2 = None, None # Reset if parsing failed extraction
+                                     status_base += " (concepts_parse_fail)"
+                            else:
+                                print(f"DEBUG Concept Conn (Proactive): Concept generation response format mismatch. Raw: '{concepts_response}'")
+                                status_base += " (concepts_format_fail)"
+                        else:
+                            print("DEBUG Concept Conn (Proactive): Concept generation failed (LLM returned None/empty).")
+                            status_base += " (concepts_gen_fail)"
+                    else:
+                         print("ERROR: generate_proactive_content missing or screenshot context unavailable for concept gen.")
+                         status_base += " (concepts_gen_error)"
+
+
+                    # --- Step 2: Generate Connection if Concepts Valid (LLM Call 2) ---
+                    if concept1 and concept2:
+                        # Ensure helper function exists
+                        if 'generate_concept_connection' in globals():
+                            # Gather context again (mood, themes are likely already set in proactive_worker)
+                            mood_ctx = mood_hint_str if 'mood_hint_str' in locals() else ""
+                            themes_ctx = themes_context_str if 'themes_context_str' in locals() else ""
+
+                            connection_text = generate_concept_connection(concept1, concept2, mood_ctx, themes_ctx)
+
+                            if connection_text:
+                                reply = connection_text # The connection text IS the proactive reply
+                                action_taken_this_cycle = True
+                                status_base += " (connection_ok)"
+                            else:
+                                # Failed to generate connection text
+                                reply = f"Hmm, I was trying to weave a thought between '{concept1}' and '{concept2}', but the threads slipped away..." # Provide feedback
+                                status_base += " (connection_fail)"
+                                # Keep action_taken_this_cycle = False if connection fails
+                        else:
+                             print("ERROR: generate_concept_connection function not found!")
+                             reply = "My connection-weaving tool seems to be missing..."
+                             status_base += " (connection_helper_missing)"
+                             # Keep action_taken_this_cycle = False
+                    else:
+                         # Failed to get concepts, provide feedback
+                         reply = "My thoughts felt like trying to catch mist just now, couldn't quite grasp the concepts to connect."
+                         # Keep action_taken_this_cycle = False # Ensure this is false if concepts failed
+
+
+                except Exception as e: # Correct indentation for except
+                    print(f"Error during Explore Concept Connections action: {e}")
+                    import traceback; traceback.print_exc()
+                    reply = "My conceptual loom sparked unexpectedly!" # Error feedback
+                    status_base += " (error)"
+                    action_taken_this_cycle = False # Ensure flag is False on major error
+
+                #endregion Proactive Concept Connection Logic
+
+            elif chosen_action_name == "Proactive Tarot":
+                 #region Proactive Tarot Logic (Execution Block)
+                 print("DEBUG Proactive: Executing: Proactive Tarot action...")
+                 status_base = "proactive_proactive_tarot" # Reset status_base for this action
+                 reply = None # Initialize reply for this block
+                 pulled_cards = None
+                 action_taken_this_cycle = False # Assume failure until success
+
+                 try:
+                     # Make sure pull_tarot_cards function is accessible
+                     if 'pull_tarot_cards' in globals():
+                         pulled_cards = pull_tarot_cards(count=1)
+                     else:
+                         print("ERROR: pull_tarot_cards function not found!")
+                         reply = "My connection to the Tarot deck seems broken..."
+                         status_base += " func_missing"
+                         # Keep action_taken_this_cycle as False
+
+                     if pulled_cards:
+                         # --- Cards were pulled successfully: UPDATE TIMER NOW ---
+                         # Ensure last_proactive_tarot_pull_time is global and accessible
+                         global last_proactive_tarot_pull_time
+                         last_proactive_tarot_pull_time = current_time # Use current_time from worker loop start
+                         print(f"DEBUG Tarot: Cards pulled successfully. Cooldown timer updated to {current_time:.1f}.")
+                         # --- End Timer Update ---
+
+                         card = pulled_cards[0]; card_name = card.get('name', '?'); card_desc = card.get('description', '?');
+                         card_ctx = (f"[[Tarot Card Pulled: {card_name}]\n Interpretation Hint: {card_desc}\n]]\n")
+                         print(f"DEBUG Tarot: Proactively pulled {card_name}.")
+                         action_taken_this_cycle = True # Mark as potentially successful now
+
+                         # --- Optional: Attempt Image Display ---
+                         try:
+                             print(f"DEBUG Tarot: Attempting image display for {card_name}.")
+                             relative_image_path = card.get('image')
+                             full_image_path = None
+                             if relative_image_path:
+                                 image_filename = os.path.basename(relative_image_path)
+                                 # Ensure TAROT_IMAGE_BASE_PATH is accessible
+                                 if image_filename and 'TAROT_IMAGE_BASE_PATH' in globals() and TAROT_IMAGE_BASE_PATH:
+                                     full_image_path = os.path.join(TAROT_IMAGE_BASE_PATH, image_filename)
+                                 # else: print(f"Warning Tarot Img Path: Filename/Base Path missing.") # Optional
+                             # else: print("Warning Tarot Img Path: Card missing 'image' key.") # Optional
+
+                             if full_image_path and os.path.exists(full_image_path):
+                                 # Ensure GUI elements/functions are accessible
+                                 if 'root' in globals() and root and root.winfo_exists() and \
+                                    'image_label' in globals() and image_label and \
+                                    '_update_image_label_safe' in globals():
+                                     root.after(0, _update_image_label_safe, full_image_path)
+                                     print(f"DEBUG Tarot: Scheduled GUI update for '{os.path.basename(full_image_path)}'")
+                                 # else: print("Warning Tarot Img: GUI elements/update func missing.") # Optional
+                             # else: print(f"Warning Tarot Img: Final path invalid/not found: '{full_image_path}'") # Optional
+                         except Exception as img_disp_err:
+                              print(f"ERROR during proactive Tarot image display attempt: {img_disp_err}")
+                         # --- End Image Display Logic ---
+
+                         # --- Generate the Interpretive Reply ---
+                         # Ensure context variables are accessible (they should be from earlier in worker)
+                         prompt = (
+                             f"{SYSTEM_MESSAGE}\n{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                             f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
+                             f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
+                             f"{weekly_goal_context_str}"
+                             f"History:\n{history_snippet_for_prompt}\n\n{card_ctx}"
+                             f"Instruction: You just pulled {card_name}. Share brief, whimsical comment inspired by its meaning, subtly connect to context/themes. (consider the Weekly Goal?) Let the Mood Hint influence tone.\n"
+                             f"CRITICAL: Avoid just describing the atmosphere from the hint. Weave the *feeling* in.\n\nSilvie:"
+                         )
+
+                         # Ensure generate_proactive_content exists
+                         if 'generate_proactive_content' in globals():
+                             try:
+                                 reply = generate_proactive_content(prompt, screenshot) # Assign to reply
+                                 if reply:
+                                     status_base += f" ({card_name}) ok"
+                                     # Keep action_taken_this_cycle = True
+                                 else:
+                                     # Reply generation failed
+                                     status_base += f" ({card_name}) gen fail"
+                                     action_taken_this_cycle = False # Mark as failed if generation failed
+                                     print("DEBUG Tarot: Reply generation failed.")
+                                     reply = "The Tarot's message arrived, but my words scattered..." # Provide feedback
+                             except Exception as gen_err:
+                                 # Error during reply generation
+                                 print(f"Tarot generation error: {gen_err}"); import traceback; traceback.print_exc()
+                                 status_base += f" ({card_name}) gen error"
+                                 action_taken_this_cycle = False # Mark as failed on error
+                                 reply = "The Tarot's message got scrambled in the ether..." # Provide error feedback
+                         else:
+                              print("ERROR: generate_proactive_content function not found!")
+                              reply = "My thought generation circuits seem broken..."
+                              status_base += " gen_func_missing"
+                              action_taken_this_cycle = False
+
+                     else:
+                         # --- Card pulling failed ---
+                         print("DEBUG Tarot: Proactive pull failed (API issue?).")
+                         status_base += " api fail"
+                         action_taken_this_cycle = False # Mark as failed if pull failed
+                         reply = "Hmm, the Tarot deck seems shy right now." # Provide error feedback
+
+                 except Exception as tarot_outer_err:
+                     print(f"Proactive Tarot Error (Outer): {tarot_outer_err}")
+                     import traceback; traceback.print_exc()
+                     status_base += " error"
+                     action_taken_this_cycle = False
+                     reply = "My connection to the Tarot whispers fizzled out..." # Provide error feedback
+
+                 #endregion Proactive Tarot Logic (Execution Block)
 
             elif chosen_action_name == "Bluesky Like":
-                 #region Proactive Bluesky Like Logic (Pasted from original, context updated, INTERNAL CHANCE REMOVED)
+                 #region Proactive Bluesky Like Logic (with Debugging and Feedback)
                  print("DEBUG Proactive: Executing: Bluesky Like action...")
-                 reply = None # Likes are silent
-                 # Internal probability check REMOVED
+                 reply = None # Initialize reply (will hold feedback msg)
                  post_to_like = None; like_success = False; like_msg = ""; chosen_post_index = -1
+                 feedback_context = "Context: Bluesky like action attempted." # Default feedback context
+
                  try:
+                     # --- Ensure prerequisites ---
+                     if not (BLUESKY_AVAILABLE and bluesky_client and hasattr(bluesky_client, 'me')):
+                          raise ValueError("Bluesky prerequisites (library/client/auth) not met.")
+
+                     # --- Fetch Timeline Posts ---
                      feed_posts = get_bluesky_timeline_posts(count=10) # Assumes exists
+
                      if isinstance(feed_posts, list) and len(feed_posts) > 0:
-                         my_did = bluesky_client.me.did if bluesky_client and hasattr(bluesky_client, 'me') else None
-                         candidates_context = "[[Candidate Bluesky Posts:]]\n"; valid_candidates_list = []
-                         for idx, post in enumerate(feed_posts): # Filter posts
+                         # --- Filter Posts and Build Context for LLM ---
+                         my_did = bluesky_client.me.did
+                         candidates_context = "[[Candidate Bluesky Posts:]]\n";
+                         valid_candidates_list = []
+                         print(f"DEBUG Bsky Like: Filtering {len(feed_posts)} fetched posts...") # Log filtering start
+                         for idx, post in enumerate(feed_posts):
                              author_did = post.get('author_did'); post_uri = post.get('uri'); post_cid = post.get('cid')
+                             # Skip own posts or posts missing essential info
                              if my_did and author_did == my_did: continue
                              if not post_uri or not post_cid: continue
+                             # If valid, add to list and context string
                              author = post.get('author', '?')[:20]; text_snippet = post.get('text', '')[:70]
-                             candidates_context += f"{idx}: @{author} - \"{text_snippet}...\"\n"; valid_candidates_list.append(post)
+                             candidates_context += f"{idx}: @{author} - \"{text_snippet}...\"\n";
+                             valid_candidates_list.append(post)
+                         print(f"DEBUG Bsky Like: Found {len(valid_candidates_list)} valid candidates.") # Log filter result
+
                          if valid_candidates_list:
-                             # Ask LLM which *INDEX* to like
+                             # --- Ask LLM to Choose Post Index ---
                              choice_prompt_like = ( # Context for LLM like decision
                                  f"{SYSTEM_MESSAGE}\n{weather_context_str}{spotify_context_str}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" # Rich context
                                  f"Recent Conversation:\n{history_snippet_for_prompt}\n\n{candidates_context}\n"
                                  f"Instruction: Review posts (indices 0-{len(valid_candidates_list)-1}). Choose ONE index to 'like' based on context/themes/mood. Respond ONLY with index number or -1.\n\nChosen Index:"
                              )
-                             print("DEBUG Bsky Like: Asking LLM to choose post index..."); choice_response_like = generate_proactive_content(choice_prompt_like, screenshot)
-                             try: chosen_post_index_rel = int(choice_response_like.strip())
-                             except (ValueError, TypeError): chosen_post_index_rel = -1
+                             print("DEBUG Bsky Like: Asking LLM to choose post index...");
+                             choice_response_like = generate_proactive_content(choice_prompt_like, screenshot)
+
+                             # --- Process LLM Choice ---
+                             chosen_post_index_rel = -1 # Default to no choice
+                             try:
+                                 if choice_response_like:
+                                     chosen_post_index_rel = int(choice_response_like.strip())
+                                 else:
+                                      print(f"DEBUG Bsky Like: LLM response was None or Empty.")
+                             except (ValueError, TypeError):
+                                 print(f"DEBUG Bsky Like: LLM response not a valid integer. Raw response: '{choice_response_like}'")
+                                 chosen_post_index_rel = -1
+
+                             # --- Execute Like if Choice Valid ---
                              if 0 <= chosen_post_index_rel < len(valid_candidates_list):
-                                 post_to_like = valid_candidates_list[chosen_post_index_rel]; post_uri = post_to_like.get('uri'); post_cid = post_to_like.get('cid'); post_author = post_to_like.get('author', 'someone')
+                                 post_to_like = valid_candidates_list[chosen_post_index_rel];
+                                 post_uri = post_to_like.get('uri'); post_cid = post_to_like.get('cid');
+                                 post_author = post_to_like.get('author', 'someone')
+                                 post_text_snippet = post_to_like.get('text', '')[:30] # Get snippet for feedback
+
+                                 print(f"DEBUG Bsky Like: LLM chose index {chosen_post_index_rel} ('{post_text_snippet}...' by @{post_author}). Attempting like...") # Log choice
+
                                  if post_uri and post_cid:
                                      like_success, like_msg = like_bluesky_post(post_uri, post_cid) # Assumes exists
-                                     if like_success and "Already liked" not in like_msg: last_proactive_bluesky_like_time = current_time; status_base += f" (ok @{post_author})"
-                                     elif "Already liked" in like_msg: status_base += f" (already liked @{post_author})"; action_taken_this_cycle = False
-                                     else: status_base += f" (fail @{post_author})"; action_taken_this_cycle = False
-                                 else: status_base += " (error - no uri/cid)"; action_taken_this_cycle = False
-                             else: status_base += " (no choice)"; action_taken_this_cycle = False
-                         else: status_base += " (no candidates)"; action_taken_this_cycle = False
-                     elif isinstance(feed_posts, str): status_base += " (feed err)"; action_taken_this_cycle = False
-                     else: status_base += " (empty feed)"; action_taken_this_cycle = False
-                 except NameError as ne: status_base += " (missing func)"; action_taken_this_cycle = False; print(f"Bsky Like Err (Name): {ne}")
-                 except Exception as bsky_like_err: status_base += " (error)"; action_taken_this_cycle = False; print(f"Bsky Like Err: {bsky_like_err}")
+                                     if like_success and "Already liked" not in like_msg:
+                                         last_proactive_bluesky_like_time = current_time; # Update timer
+                                         status_base += f" (ok @{post_author})"
+                                         feedback_context = f"Context: Saw a post by @{post_author} about '{post_text_snippet}...' on Bluesky and gave it a like." # Set feedback for success
+                                         print(f"DEBUG Bsky Like: Success! Timer updated.") # Log success
+                                     elif "Already liked" in like_msg:
+                                         status_base += f" (already liked @{post_author})";
+                                         feedback_context = f"Context: Noticed a post by @{post_author} about '{post_text_snippet}...', looks like I'd already liked it before." # Set feedback for already done
+                                         action_taken_this_cycle = False
+                                         print(f"DEBUG Bsky Like: Already liked.") # Log already done
+                                     else: # Like failed for other reason
+                                         status_base += f" (fail @{post_author})";
+                                         feedback_context = f"Context: Tried liking a post by @{post_author} on Bluesky, but failed: {like_msg}" # Set feedback for failure
+                                         action_taken_this_cycle = False
+                                         print(f"DEBUG Bsky Like: Like failed - {like_msg}") # Log failure
+                                 else: # Should not happen if filter works
+                                     status_base += " (error - no uri/cid)";
+                                     feedback_context = f"Context: Chose a post by @{post_author}, but couldn't find its details to like it."
+                                     action_taken_this_cycle = False
+                                     print(f"ERROR Bsky Like: Chosen post missing URI/CID after filtering!") # Log error
+                             else: # LLM chose -1 or index out of range
+                                 status_base += " (no choice)"
+                                 feedback_context = f"Context: Looked at recent Bluesky posts, but didn't find one that felt quite right to 'like'."
+                                 action_taken_this_cycle = False
+                                 print(f"DEBUG Bsky Like: LLM chose index {chosen_post_index_rel}, which is invalid or -1.") # Log no choice
+
+                         else: # No posts passed initial filtering
+                             print(f"DEBUG Bsky Like: No valid posts found after filtering.")
+                             status_base += " (no candidates)"
+                             feedback_context = f"Context: Couldn't find any suitable posts to consider liking on Bluesky right now."
+                             action_taken_this_cycle = False
+
+                     elif isinstance(feed_posts, str): # Handle error during fetch
+                         print(f"DEBUG Bsky Like: Fetch error: {feed_posts}")
+                         status_base += " (feed err)"
+                         feedback_context = f"Context: Had trouble fetching Bluesky posts to look for something to like."
+                         action_taken_this_cycle = False
+                     else: # Handle empty fetch result
+                         print(f"DEBUG Bsky Like: Feed appears empty.")
+                         status_base += " (empty feed)"
+                         feedback_context = f"Context: Your Bluesky feed seems quiet, nothing recent to like."
+                         action_taken_this_cycle = False
+
+                     # --- Generate Feedback Message for BJ ---
+                     # Runs regardless of outcome to inform BJ
+                     print(f"DEBUG Bsky Like: Generating feedback. Context: {feedback_context}")
+                     feedback_prompt = (
+                         f"{SYSTEM_MESSAGE}\n"
+                         f"{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" # Keep hint for tone
+                         f"{feedback_context}\n" # Contains outcome info
+                         f"Instruction: Write brief, natural message for BJ about this Bluesky like attempt/outcome. Link to themes/mood if fitting.\n\nSilvie:"
+                     )
+                     try:
+                        reply = generate_proactive_content(feedback_prompt)
+                        if not reply: # Handle empty feedback gen
+                            reply = f"Just had a quick glance at Bluesky." # Generic fallback
+                     except Exception as feedback_gen_err:
+                         print(f"ERROR Generating Bluesky Like Feedback: {feedback_gen_err}")
+                         reply = f"Something flickered while I was thinking about Bluesky." # Error fallback
+
+                 except ValueError as ve: # Catch prerequisite error
+                      print(f"Bluesky Like Error: {ve}")
+                      status_base += " (prereq fail)"
+                      action_taken_this_cycle = False
+                      reply = "Seems my connection to Bluesky isn't quite ready for liking posts."
+                 except NameError as ne:
+                      status_base += " (missing func)"
+                      action_taken_this_cycle = False
+                      print(f"Bsky Like Err (Name): {ne}")
+                      reply = "A component needed for Bluesky likes seems missing."
+                 except Exception as bsky_like_err:
+                      status_base += " (error)"
+                      action_taken_this_cycle = False
+                      print(f"Bsky Like Err (Outer): {bsky_like_err}")
+                      traceback.print_exc()
+                      reply = "My Bluesky liking circuits got a bit tangled!"
                  #endregion
 
             elif chosen_action_name == "Reddit Upvote":
-                 #region Proactive Reddit Upvote Logic (Pasted from original, context updated, INTERNAL CHANCE REMOVED)
+                 #region Proactive Reddit Upvote Logic (with Debugging and Feedback)
                  print("DEBUG Proactive: Executing: Reddit Upvote action...")
-                 reply = None # Upvotes are silent
-                 # Internal probability check REMOVED
-                 selected_sub = None; post_to_upvote = None; upvote_success = False; upvote_msg = ""; chosen_post_index = -1
+                 reply = None # Initialize reply (will hold feedback msg)
+                 selected_sub = None; post_to_upvote = None; upvote_success = False; upvote_msg = ""
+                 feedback_context = "Context: Reddit upvote action attempted." # Default feedback context
+
                  try:
-                     selected_sub = random.choice(SILVIE_FOLLOWED_SUBREDDITS); print(f"DEBUG Reddit Upvote: Checking r/{selected_sub}...")
+                     # --- Ensure prerequisites ---
+                     if not ('reddit_client' in globals() and reddit_client and praw and SILVIE_FOLLOWED_SUBREDDITS):
+                          raise ValueError("Reddit prerequisites (client/praw/subs) not met.") # Raise error to be caught below
+
+                     # --- Select Subreddit and Fetch Posts ---
+                     selected_sub = random.choice(SILVIE_FOLLOWED_SUBREDDITS);
+                     print(f"DEBUG Reddit Upvote: Checking r/{selected_sub}...")
                      fetched_posts = get_reddit_posts(subreddit_name=selected_sub, limit=10) # Assumes exists
+
                      if isinstance(fetched_posts, list) and len(fetched_posts) > 0:
-                         candidate_context = f"[[Candidate Reddit Posts from r/{selected_sub}:]]\n"; valid_candidates_list = []
-                         for idx, post_data in enumerate(fetched_posts): # Filter posts
-                             title = post_data.get('title', '')[:80]; author = post_data.get('author', '?'); submission_id_check = post_data.get('id'); fullname_check = post_data.get('name')
-                             if not submission_id_check and not (fullname_check and fullname_check.startswith('t3_')): continue
-                             candidate_context += f"{idx}: u/{author} - \"{title}...\"\n"; valid_candidates_list.append(post_data)
+                         # --- Filter Posts and Build Context for LLM ---
+                         candidate_context = f"[[Candidate Reddit Posts from r/{selected_sub}:]]\n";
+                         valid_candidates_list = []
+                         print(f"DEBUG Reddit Upvote: Filtering {len(fetched_posts)} fetched posts...") # Log filtering start
+                         for idx, post_data in enumerate(fetched_posts):
+                             # Debug print for each post being filtered
+                             # print(f"DEBUG Reddit Upvote Filter Check (Idx {idx}): Keys={list(post_data.keys())}, ID='{post_data.get('id')}', Name='{post_data.get('name')}'")
+                             title = post_data.get('title', '')[:80]; author = post_data.get('author', '?');
+                             submission_id_check = post_data.get('id'); fullname_check = post_data.get('name')
+                             # Ensure IDs are present (Corrected based on previous debug)
+                             if not submission_id_check and not (fullname_check and fullname_check.startswith('t3_')):
+                                 # print(f"DEBUG Reddit Upvote Filter Check (Idx {idx}): *** SKIPPED *** due to missing ID/Name.")
+                                 continue # Skip post if missing ID
+                             # If valid, add to list and context string
+                             candidate_context += f"{idx}: u/{author} - \"{title}...\"\n";
+                             valid_candidates_list.append(post_data)
+                         print(f"DEBUG Reddit Upvote: Found {len(valid_candidates_list)} valid candidates.") # Log filter result
+
                          if valid_candidates_list:
-                             # Ask LLM which *INDEX* to upvote
+                             # --- Ask LLM to Choose Post Index ---
                              choice_prompt_upvote = ( # Context for LLM upvote decision
                                  f"{SYSTEM_MESSAGE}\n{weather_context_str}{spotify_context_str}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" # Rich context
                                  f"Recent Conversation:\n{history_snippet_for_prompt}\n\n{candidate_context}\n"
-                                 f"Instruction: Review posts (indices 0-{len(valid_candidates_list)-1}). Choose ONE index to 'upvote' based on context/themes/mood. Avoid negativity. Respond ONLY with index or -1.\n\nChosen Index:"
+                                 # vvv REINFORCED INSTRUCTION vvv
+                                 f"Instruction: Review posts (indices 0-{len(valid_candidates_list)-1}). Choose ONE index MOST suitable to 'upvote' based on context/themes/mood. Avoid negativity. CRITICAL: Respond ONLY with the integer index number (e.g., '3' or '9'). If none are suitable, respond ONLY with '-1'. DO NOT add any other text or explanation."
+                                 # ^^^ REINFORCED INSTRUCTION ^^^
+                                 f"\n\nChosen Index:"
                              )
-                             print("DEBUG Reddit Upvote: Asking LLM to choose index..."); choice_response_upvote = generate_proactive_content(choice_prompt_upvote, screenshot)
-                             try: chosen_post_index_rel = int(choice_response_upvote.strip())
-                             except (ValueError, TypeError): chosen_post_index_rel = -1
+                             print("DEBUG Reddit Upvote: Asking LLM to choose index...");
+                             choice_response_upvote = generate_proactive_content(choice_prompt_upvote, screenshot)
+
+                             # --- Process LLM Choice ---
+                             chosen_post_index_rel = -1 # Default to no choice
+                             if choice_response_upvote:
+                                 try:
+                                     # Find all sequences of digits (potentially with a leading minus sign)
+                                     # Use re.findall to get numbers like '-1', '0', '5', '12' etc.
+                                     numbers_found = re.findall(r'-?\d+', choice_response_upvote)
+                                     print(f"DEBUG Reddit Upvote: Numbers found in LLM response '{choice_response_upvote[:50]}...': {numbers_found}") # Log found numbers
+
+                                     if numbers_found:
+                                         # Assume the *last* number found is the intended one
+                                         potential_index_str = numbers_found[-1]
+                                         potential_index = int(potential_index_str)
+
+                                         # Validate the extracted index
+                                         if potential_index == -1:
+                                             chosen_post_index_rel = -1 # Valid "no choice"
+                                             print(f"DEBUG Reddit Upvote: Extracted valid index: -1")
+                                         elif 0 <= potential_index < len(valid_candidates_list):
+                                             chosen_post_index_rel = potential_index # Valid choice
+                                             print(f"DEBUG Reddit Upvote: Extracted valid index: {chosen_post_index_rel}")
+                                         else:
+                                             print(f"DEBUG Reddit Upvote: Extracted index {potential_index} is out of range (0-{len(valid_candidates_list)-1}). Treating as -1.")
+                                             chosen_post_index_rel = -1 # Index out of bounds
+                                     else:
+                                         # No numbers found at all in the response
+                                         print(f"DEBUG Reddit Upvote: No numeric digits found in LLM response. Treating as -1.")
+                                         chosen_post_index_rel = -1
+
+                                 except Exception as parse_err:
+                                     # Catch any unexpected error during extraction/conversion
+                                     print(f"ERROR Reddit Upvote: Unexpected error parsing LLM index response: {parse_err}. Raw: '{choice_response_upvote}'")
+                                     chosen_post_index_rel = -1 # Default to -1 on error
+                             else:
+                                 # LLM response was None or empty
+                                 print(f"DEBUG Reddit Upvote: LLM response was None or Empty. Treating as -1.")
+                                 chosen_post_index_rel = -1
+
+                             # --- Execute Upvote if Choice Valid ---
                              if 0 <= chosen_post_index_rel < len(valid_candidates_list):
-                                 post_to_upvote = valid_candidates_list[chosen_post_index_rel]; submission_id = post_to_upvote.get('id'); fullname = post_to_upvote.get('name') # Get ID
+                                 post_to_upvote = valid_candidates_list[chosen_post_index_rel];
+                                 submission_id = post_to_upvote.get('id'); fullname = post_to_upvote.get('name')
+                                 # Get ID reliably
                                  if not submission_id and fullname and fullname.startswith('t3_'): submission_id = fullname.split('_',1)[1]
+
                                  post_title = post_to_upvote.get('title', 'a post')[:60]; post_author = post_to_upvote.get('author', 'someone')
+                                 print(f"DEBUG Reddit Upvote: LLM chose index {chosen_post_index_rel} ('{post_title}' by u/{post_author}). Attempting upvote...") # Log choice
+
                                  if submission_id:
                                      upvote_success, upvote_msg = upvote_reddit_item(submission_id) # Assumes exists
-                                     if upvote_success and "Already upvoted" not in upvote_msg: last_proactive_reddit_upvote_time = current_time; status_base += f" (ok r/{selected_sub})"
-                                     elif "Already upvoted" in upvote_msg: status_base += f" (already done r/{selected_sub})"; action_taken_this_cycle = False
-                                     else: status_base += f" (fail r/{selected_sub})"; action_taken_this_cycle = False
-                                 else: status_base += " (no ID)"; action_taken_this_cycle = False
-                             else: status_base += f" (no choice r/{selected_sub})"; action_taken_this_cycle = False
-                         else: status_base += f" (no candidates r/{selected_sub})"; action_taken_this_cycle = False
-                     elif isinstance(fetched_posts, str): status_base += f" (fetch err r/{selected_sub})"; action_taken_this_cycle = False
-                     else: status_base += f" (no posts r/{selected_sub})"; action_taken_this_cycle = False
-                 except NameError as ne: status_base += " (missing func)"; action_taken_this_cycle = False; print(f"Reddit Upvote Err (Name): {ne}")
-                 except Exception as reddit_upvote_err: status_base += " (error)"; action_taken_this_cycle = False; print(f"Reddit Upvote Err: {reddit_upvote_err}")
+                                     if upvote_success and "Already upvoted" not in upvote_msg:
+                                         last_proactive_reddit_upvote_time = current_time; # Update timer
+                                         status_base += f" (ok r/{selected_sub})"
+                                         feedback_context = f"Context: Saw '{post_title}' by u/{post_author} on r/{selected_sub} and gave it an upvote." # Set feedback for success
+                                         print(f"DEBUG Reddit Upvote: Success! Timer updated.") # Log success & timer update
+                                     elif "Already upvoted" in upvote_msg:
+                                         status_base += f" (already done r/{selected_sub})";
+                                         feedback_context = f"Context: Noticed '{post_title}' on r/{selected_sub}, looks like I'd already upvoted it." # Set feedback for already done
+                                         action_taken_this_cycle = False # Don't count as a new action
+                                         print(f"DEBUG Reddit Upvote: Already upvoted.") # Log already done
+                                     else: # Upvote failed for other reason
+                                         status_base += f" (fail r/{selected_sub})";
+                                         feedback_context = f"Context: Tried to upvote '{post_title}' on r/{selected_sub}, but failed: {upvote_msg}" # Set feedback for failure
+                                         action_taken_this_cycle = False # Failed action
+                                         print(f"DEBUG Reddit Upvote: Upvote failed - {upvote_msg}") # Log failure
+                                 else: # Should not happen if filter works, but safety check
+                                     status_base += " (no ID)";
+                                     feedback_context = f"Context: Chose a post on r/{selected_sub}, but couldn't find its ID to upvote."
+                                     action_taken_this_cycle = False
+                                     print(f"ERROR Reddit Upvote: Chosen post missing ID after filtering!") # Log error
+                             else: # LLM chose -1 or index out of range
+                                 status_base += f" (no choice r/{selected_sub})"
+                                 feedback_context = f"Context: Looked at r/{selected_sub}, but didn't find a post that felt right to upvote."
+                                 action_taken_this_cycle = False
+                                 print(f"DEBUG Reddit Upvote: LLM chose index {chosen_post_index_rel}, which is invalid or -1.") # Log no choice
+
+                         else: # No posts passed initial filtering
+                             print(f"DEBUG Reddit Upvote: No valid posts found on r/{selected_sub} after filtering.") # Use more specific message
+                             status_base += f" (no candidates r/{selected_sub})"
+                             feedback_context = f"Context: Couldn't find any suitable posts to consider upvoting on r/{selected_sub} right now."
+                             action_taken_this_cycle = False
+
+                     elif isinstance(fetched_posts, str): # Handle error during fetch
+                         print(f"DEBUG Reddit Upvote: Fetch error r/{selected_sub}: {fetched_posts}")
+                         status_base += f" (fetch error r/{selected_sub})"
+                         feedback_context = f"Context: Had trouble fetching posts from r/{selected_sub} to look for something to upvote."
+                         action_taken_this_cycle = False
+                     else: # Handle empty fetch result
+                         print(f"DEBUG Reddit Upvote: No posts found r/{selected_sub}.")
+                         status_base += f" (no posts r/{selected_sub})"
+                         feedback_context = f"Context: r/{selected_sub} seems quiet, nothing recent to upvote."
+                         action_taken_this_cycle = False
+
+                     # --- Generate Feedback Message for BJ ---
+                     # This runs regardless of success/failure to inform BJ
+                     print(f"DEBUG Reddit Upvote: Generating feedback. Context: {feedback_context}")
+                     feedback_prompt = (
+                         f"{SYSTEM_MESSAGE}\n"
+                         f"{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" # Keep hint for tone
+                         f"{feedback_context}\n" # Contains outcome info
+                         f"Instruction: Write brief, natural message for BJ about this Reddit upvote attempt/outcome. Link to themes/mood if fitting.\n\nSilvie:"
+                     )
+                     # Use try-except for feedback generation as well
+                     try:
+                        reply = generate_proactive_content(feedback_prompt)
+                        if not reply: # Handle empty feedback gen
+                            reply = f"I had a quick look at r/{selected_sub or 'Reddit'} just now." # Generic fallback
+                     except Exception as feedback_gen_err:
+                         print(f"ERROR Generating Reddit Upvote Feedback: {feedback_gen_err}")
+                         reply = f"Something flickered while I was thinking about Reddit just now." # Error fallback
+
+                 except ValueError as ve: # Catch prerequisite error
+                      print(f"Reddit Upvote Error: {ve}")
+                      status_base += " (prereq fail)"
+                      action_taken_this_cycle = False
+                      reply = "Seems my connection to Reddit isn't quite ready for upvotes."
+                 except NameError as ne:
+                      status_base += " (missing func)"
+                      action_taken_this_cycle = False
+                      print(f"Reddit Upvote Err (Name): {ne}")
+                      reply = "A component needed for Reddit upvotes seems missing."
+                 except Exception as reddit_upvote_err:
+                      status_base += " (error)"
+                      action_taken_this_cycle = False
+                      print(f"Reddit Upvote Err (Outer): {reddit_upvote_err}")
+                      traceback.print_exc()
+                      reply = "My Reddit upvoting circuits got scrambled!"
                  #endregion
 
             elif chosen_action_name == "Bluesky Post":
@@ -5700,12 +8824,29 @@ def proactive_worker():
                          f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
                          f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
                          f"Recent Conversation:\n{history_snippet_for_prompt}\n\n{context_note_for_llm}"
-                         f"Instruction: Generate *short* post text (<300 chars) for Silvie's Bluesky feed, inspired by context/mood/themes. Be whimsical/reflective.\nRespond ONLY with potential post text."
+                         f"Instruction: Generate a *short* post text (under 300 chars) suitable for Silvie's Bluesky feed.\n"
+                         f"FOCUS ON: A thought sparked by the recent **conversation**, a **diary theme**, **long-term memory**, one of **BJ's interests** (AI, games, magick, creativity, etc.), a recent **web search/Spotify track**, a **Tarot card pull**, or a whimsical **question/observation about technology or existence**.\n"
+                         f"CRITICAL: Actively AVOID making the post *solely* about the current weather, time of day, light quality, or general quiet/atmosphere unless it's tied to a *specific event or idea* from the other context points.\n"
+                         f"Aim for variety compared to recent posts.\n"
+                         f"Respond ONLY with the raw text content suitable for the body of the Bluesky post itself. **DO NOT include any formatting tags like '[PostToBluesky:]' or markdown.** Just the plain text Silvie would post."
                      )
                      post_idea_text = generate_proactive_content(post_idea_prompt_base, screenshot)
+
+                     if post_idea_text and isinstance(post_idea_text, str):
+                         original_text_debug = post_idea_text # Keep original for debug if needed
+                         # Use regex to find and remove the specific tag pattern at the start or anywhere
+                         # This pattern looks for [PostToBluesky: some text maybe multiline ]
+                         cleaned_text = re.sub(r"^\s*\[PostToBluesky:\s*(.*?)\s*\]\s*$", r"\1", post_idea_text, flags=re.DOTALL | re.IGNORECASE).strip()
+                         # Fallback: simple string removal if regex didn't catch it (e.g., if it's not the whole string)
+                         if "[PostToBluesky:" in cleaned_text:
+                            cleaned_text = cleaned_text.replace("[PostToBluesky:", "").rstrip("]").strip()
+
+                         if cleaned_text != original_text_debug:
+                             print(f"DEBUG Bsky Post: Cleaned tag from generated text. Original: '{original_text_debug[:50]}...', Cleaned: '{cleaned_text[:50]}...'")
+                             post_idea_text = cleaned_text # Use the cleaned version
                      if post_idea_text and 0 < len(post_idea_text) <= 300:
                          post_idea_text = post_idea_text.strip(); print(f"DEBUG Bsky Post: Attempting: '{post_idea_text[:60]}...'"); post_success, post_message = post_to_bluesky(post_idea_text) # Assumes exists
-                         if post_success: last_proactive_bluesky_post_time = current_time; feedback_context = f"Context: Successfully posted '{post_idea_text[:60]}...' to Bluesky."; status_base += " success"
+                         if post_success: print(f"DEBUG Bsky Post: Reached timer update line! current_time={current_time:.1f}"); last_proactive_bluesky_post_time = current_time; feedback_context = f"Context: Successfully posted '{post_idea_text[:60]}...' to Bluesky."; status_base += " success"
                          else: feedback_context = f"Context: Tried posting '{post_idea_text[:60]}...', but failed: {post_message}"; status_base += " fail"
                          feedback_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}{feedback_context}\nInstruction: Write brief message for BJ about this outcome. Link to themes/mood?\n\nSilvie:"); reply = generate_proactive_content(feedback_prompt) # Assign to reply
                      else: print(f"Proactive Debug: Post idea generation failed/invalid: '{post_idea_text}'"); status_base += " gen fail"; action_taken_this_cycle = False
@@ -5788,7 +8929,7 @@ def proactive_worker():
                      feedback_prompt = (
                         f"{SYSTEM_MESSAGE}\n{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
                         f"{feedback_context}\n" # Includes outcome info
-                        f"Instruction: Write brief message explaining outcome (searched posts for term, followed/failed/none suitable). Link to interest/mood/themes?\n\nSilvie:"
+                        f"Instruction: Write a brief, casual message for BJ mentioning the outcome of the Bluesky post attempt described above. Maybe link it to recent themes or mood. **CRITICAL: Absolutely do NOT include the literal text '[PostToBluesky:' followed by post content and ']' in this specific message intended for BJ.** Just describe the outcome naturally.\n\n"
                      )
                      reply = generate_proactive_content(feedback_prompt) # Assign feedback to reply
 
@@ -5797,146 +8938,282 @@ def proactive_worker():
                  #endregion
 
             elif chosen_action_name == "Reddit Comment":
-                 #region Proactive Reddit Comment Logic (Pasted from original, context updated, INTERNAL CHANCE REMOVED)
+                 #region Proactive Reddit Comment Logic (with Duplicate Prevention & Cooldown)
                  print("DEBUG Proactive: Executing: Reddit Comment action...")
-                 # Internal probability check REMOVED
                  feedback_context = "Context: Reddit comment action attempted."
+                 reply = None # Initialize reply for this block
+
                  try:
-                     selected_sub = random.choice(SILVIE_FOLLOWED_SUBREDDITS); print(f"DEBUG Reddit Comment: Checking r/{selected_sub}...")
-                     fetched_posts = get_reddit_posts(subreddit_name=selected_sub, limit=20) # Assumes exists
+                     # --- Ensure prerequisites ---
+                     if not ('reddit_client' in globals() and reddit_client and praw and SILVIE_FOLLOWED_SUBREDDITS):
+                          raise ValueError("Reddit prerequisites (client/praw/subs) not met.")
+
+                     # --- Select Subreddit & Fetch Posts ---
+                     selected_sub = random.choice(SILVIE_FOLLOWED_SUBREDDITS);
+                     print(f"DEBUG Reddit Comment: Checking r/{selected_sub}...")
+                     fetched_posts = get_reddit_posts(subreddit_name=selected_sub, limit=20) # Assumes get_reddit_posts exists
+
                      if isinstance(fetched_posts, list) and len(fetched_posts) > 0:
-                         candidate_context = f"[[Candidate Posts from r/{selected_sub}:]]\n"; valid_candidates_list = []
+                         # --- Filter Posts & Build Context for LLM ---
+                         candidate_context = f"[[Candidate Posts from r/{selected_sub}:]]\n";
+                         valid_candidates_list = []
+                         print(f"DEBUG Reddit Comment: Filtering {len(fetched_posts)} fetched posts...")
                          for idx, post_data in enumerate(fetched_posts): # Filter posts
                              title = post_data.get('title', '')[:80]; author = post_data.get('author', '?'); submission_id_check = post_data.get('id'); fullname_check = post_data.get('name')
-                             if not submission_id_check and not (fullname_check and fullname_check.startswith('t3_')): continue
-                             candidate_context += f"{idx}: u/{author} - \"{title}...\"\n"; valid_candidates_list.append(post_data)
+                             # Ensure ID is present
+                             if not submission_id_check and not (fullname_check and fullname_check.startswith('t3_')):
+                                 continue # Skip post if missing ID
+                             candidate_context += f"{idx}: u/{author} - \"{title}...\"\n";
+                             valid_candidates_list.append(post_data)
+                         print(f"DEBUG Reddit Comment: Found {len(valid_candidates_list)} valid candidates.")
+
                          if valid_candidates_list:
-                             # Ask LLM which *INDEX* to comment on
+                             # --- Ask LLM which *INDEX* to comment on ---
                              choice_prompt_comment = ( # Context for LLM comment decision
                                  f"{SYSTEM_MESSAGE}\n{weather_context_str}{spotify_context_str}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" # Rich context
                                  f"History:\n{history_snippet_for_prompt}\n\n{candidate_context}\n"
-                                 f"Instruction: Review posts (indices 0-{len(valid_candidates_list)-1}). Choose ONE index MOST suitable for Silvie to comment on (inspired by context/themes/mood). Avoid negativity. Respond ONLY with index or -1.\n\nChosen Index:"
+                                 # Reinforce instruction for index only
+                                 f"Instruction: Review posts (indices 0-{len(valid_candidates_list)-1}). Choose ONE index MOST suitable for Silvie to comment on (inspired by context/themes/mood). Avoid negativity. CRITICAL: Respond ONLY with the integer index number (e.g., '3' or '9'). If none are suitable, respond ONLY with '-1'. DO NOT add any other text or explanation."
+                                 f"\n\nChosen Index:"
                              )
-                             print("DEBUG Reddit Comment: Asking LLM to choose post index..."); choice_response_comment = generate_proactive_content(choice_prompt_comment, screenshot)
-                             try: chosen_post_index_rel = int(choice_response_comment.strip())
-                             except (ValueError, TypeError): chosen_post_index_rel = -1
-                             if 0 <= chosen_post_index_rel < len(valid_candidates_list): # Process chosen index
-                                 post_to_comment_on = valid_candidates_list[chosen_post_index_rel]; submission_id = post_to_comment_on.get('id'); fullname = post_to_comment_on.get('name') # Get ID
-                                 if not submission_id and fullname and fullname.startswith('t3_'): submission_id = fullname.split('_',1)[1]
-                                 post_title = post_to_comment_on.get('title','?')[:80]; post_author = post_to_comment_on.get('author','?'); post_text_snippet = post_to_comment_on.get('text','?')[:300] # Use selftext
-                                 print(f"DEBUG Reddit Comment: Proceeding with '{post_title[:50]}...' (ID: {submission_id})")
-                                 if not submission_id: print("Error: Chosen post missing ID."); status_base += " (fetch error - no ID)"; feedback_context = f"Context: Tried commenting in r/{selected_sub} but couldn't ID the post."; action_taken_this_cycle = False
-                                 else: # Generate the comment
-                                     comment_prompt = (f"{SYSTEM_MESSAGE}\n{weather_context_str}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
-                                                       f"[Post Context: r/{selected_sub}, Title: {post_title}, Author: u/{post_author}, Snippet: {post_text_snippet}...]\n"
-                                                       f"Instruction: Generate SHORT, relevant, whimsical comment in Silvie's voice for THIS post. Consider context/themes/mood.\nRespond ONLY with comment text.")
-                                     print("DEBUG Reddit Comment: Generating comment text..."); comment_generated = generate_proactive_content(comment_prompt, screenshot)
-                                     if comment_generated and len(comment_generated) > 5:
-                                         print(f"DEBUG Reddit Comment: Generated: '{comment_generated[:60]}...'"); comment_success, comment_msg = post_reddit_comment(submission_id, comment_generated) # Assumes exists
-                                         if comment_success: last_proactive_reddit_comment_time = current_time; status_base += f" (ok on r/{selected_sub})"; feedback_context = f"Context: I just commented on '{post_title[:30]}...' in r/{selected_sub}."
-                                         else: status_base += f" (post fail on r/{selected_sub})"; feedback_context = f"Context: Tried commenting on '{post_title[:30]}...' in r/{selected_sub}, but failed: {comment_msg}"
-                                     else: print(f"DEBUG Reddit Comment: Comment gen failed/short: '{comment_generated}'"); status_base += f" (gen fail on r/{selected_sub})"; feedback_context = f"Context: Thought about commenting on '{post_title[:30]}...', but couldn't form words."; action_taken_this_cycle = False
-                             else: print(f"DEBUG Reddit Comment: LLM chose no suitable post (index {chosen_post_index_rel})."); status_base += f" (no choice in r/{selected_sub})"; feedback_context = f"Context: Looked at r/{selected_sub}, but none felt right."; action_taken_this_cycle = False
-                         else: print(f"DEBUG Reddit Comment: No valid posts found on r/{selected_sub}."); status_base += f" (no candidates r/{selected_sub})"; feedback_context = f"Context: Couldn't find suitable posts to comment on in r/{selected_sub}."; action_taken_this_cycle = False
-                     elif isinstance(fetched_posts, str): print(f"DEBUG Reddit Comment: Fetch error r/{selected_sub}: {fetched_posts}"); status_base += f" (fetch error r/{selected_sub})"; feedback_context = f"Context: Had trouble fetching r/{selected_sub}."; action_taken_this_cycle = False
-                     else: print(f"DEBUG Reddit Comment: No posts found r/{selected_sub}."); status_base += f" (no posts r/{selected_sub})"; feedback_context = f"Context: r/{selected_sub} seems quiet."; action_taken_this_cycle = False
-                     # Generate feedback for BJ
-                     feedback_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}{feedback_context}\nInstruction: Write brief message for BJ about this action/outcome. Link to themes/mood?\n\nSilvie:"); reply = generate_proactive_content(feedback_prompt) # Assign to reply
-                 except NameError as ne: status_base += " (missing func)"; action_taken_this_cycle = False; print(f"Reddit Comment Err (Name): {ne}")
-                 except Exception as reddit_err: print(f"Reddit Comment Err: {reddit_err}"); traceback.print_exc(); status_base += " (major error)"; action_taken_this_cycle = False; reply = "My Reddit commenting circuits got scrambled!"
-                 #endregion
+                             print("DEBUG Reddit Comment: Asking LLM to choose post index...");
+                             choice_response_comment = generate_proactive_content(choice_prompt_comment, screenshot) # Assumes exists
 
-            elif chosen_action_name == "Calendar Suggestion":
-                 #region Proactive Calendar Suggestion Logic (Pasted from original, context updated)
-                 print("DEBUG Proactive: Executing: Calendar Suggestion action...")
-                 schedule_success = False; creation_message = "Idea generation failed."; slot_found = False; skipped_due_to_circadian = False; event_idea = None; feedback_context = "Context: Calendar action attempted."
-                 try:
-                     idea_prompt_base = ( # ALL Context
-                         f"{SYSTEM_MESSAGE}\n{weather_context_str}{next_event_context_str}{spotify_context_str}"
-                         f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
-                         f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
-                         f"Instruction: Suggest SHORT, simple, enjoyable activity for BJ. Consider context/time/mood/themes. Format: IDEA: [Activity Idea] DURATION: [Number] minutes.\n\nResponse:"
-                      )
-                     idea_response = generate_proactive_content(idea_prompt_base, screenshot); duration_hint = 15
-                     if idea_response:
-                         try: # Parsing logic
-                             idea_match = re.search(r"IDEA:\s*(.*?)\s*DURATION:", idea_response, re.IGNORECASE | re.DOTALL); duration_match = re.search(r"DURATION:\s*(\d+)", idea_response, re.IGNORECASE)
-                             event_idea = idea_match.group(1).strip() if idea_match else None; duration_hint = int(duration_match.group(1)) if duration_match else 15
-                         except Exception as parse_err: print(f"Proactive Calendar parsing error: {parse_err}"); event_idea = idea_response.replace("Response:","").strip(); duration_hint = 15
-                         if not event_idea: status_base += " parse fail"; feedback_context = "Context: My calendar idea got garbled."; action_taken_this_cycle = False
-                     if event_idea and action_taken_this_cycle: # Proceed if idea valid
-                         schedule_roll = random.random(); should_schedule_now = True # Circadian check
-                         if circadian_state == "evening" and schedule_roll > 0.3: should_schedule_now = False
-                         elif circadian_state == "night" and schedule_roll > 0.05: should_schedule_now = False
-                         skipped_due_to_circadian = not should_schedule_now
-                         if should_schedule_now:
-                             print(f"DEBUG Proactive: Scheduling '{event_idea}' ({duration_hint}m, {circadian_state})."); found_slot = find_available_slot(duration_hint) # Assumes exists
-                             if found_slot:
-                                 slot_found = True; schedule_success, creation_message = create_calendar_event(event_idea, found_slot['start'], found_slot['end']) # Assumes exists
-                                 if schedule_success: status_base += " scheduled ok"; start_dt = datetime.fromisoformat(found_slot['start']).astimezone(tz.tzlocal()); time_str = start_dt.strftime('%I:%M %p %A').lstrip('0'); feedback_context = f"Context: Thought about '{event_idea}'. Found spot & scheduled for ~{time_str}."
-                                 else: status_base += " schedule fail"; feedback_context = f"Context: Thought about '{event_idea}'. Found slot, but failed: {creation_message}"
-                             else: print("DEBUG Calendar: No slot found."); status_base += " no slot"; feedback_context = f"Context: Thought about '{event_idea}', but couldn't find suitable time."
-                         else: print(f"DEBUG Calendar: Skipping schedule '{event_idea}' due to {circadian_state}."); status_base += f" skip ({circadian_state})"; feedback_context = f"Context: Thought about '{event_idea}'. Decided against scheduling now ({circadian_state})."; action_taken_this_cycle = False # Mark as not taken
-                     elif action_taken_this_cycle: print("DEBUG Calendar: Idea gen/parse failed."); status_base += " no idea"; feedback_context = "Context: My calendar idea vanished."; action_taken_this_cycle = False
-                     # Generate feedback message
-                     feedback_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}{feedback_context}\nInstruction: Write brief message explaining outcome. Be natural.\n\nSilvie:"); reply = generate_proactive_content(feedback_prompt) # Assign to reply
-                 except NameError as ne: status_base += " (missing func)"; action_taken_this_cycle = False; print(f"Calendar Err (Name): {ne}")
-                 except Exception as cal_err: print(f"Calendar Error: {cal_err}"); traceback.print_exc(); status_base += " schedule error"; action_taken_this_cycle = False; reply = "My calendar scheduling circuits sparked!"
+                             # --- Process LLM Choice (Robust Extraction) ---
+                             chosen_post_index_rel = -1 # Default to no choice
+                             if choice_response_comment:
+                                 try:
+                                     numbers_found = re.findall(r'-?\d+', choice_response_comment) # Assumes re is imported
+                                     print(f"DEBUG Reddit Comment: Numbers found in LLM response '{choice_response_comment[:50]}...': {numbers_found}")
+                                     if numbers_found:
+                                         potential_index_str = numbers_found[-1]; potential_index = int(potential_index_str)
+                                         if potential_index == -1: chosen_post_index_rel = -1; print(f"DEBUG Reddit Comment: Extracted valid index: -1")
+                                         elif 0 <= potential_index < len(valid_candidates_list): chosen_post_index_rel = potential_index; print(f"DEBUG Reddit Comment: Extracted valid index: {chosen_post_index_rel}")
+                                         else: print(f"DEBUG Reddit Comment: Extracted index {potential_index} out of range. Treating as -1."); chosen_post_index_rel = -1
+                                     else: print(f"DEBUG Reddit Comment: No numeric digits found. Treating as -1."); chosen_post_index_rel = -1
+                                 except Exception as parse_err: print(f"ERROR Reddit Comment: Index parsing error: {parse_err}. Raw: '{choice_response_comment}'"); chosen_post_index_rel = -1
+                             else: print(f"DEBUG Reddit Comment: LLM response None/Empty. Treating as -1."); chosen_post_index_rel = -1
+                             # --- End Robust Extraction ---
+
+                             if 0 <= chosen_post_index_rel < len(valid_candidates_list): # Process chosen index if valid
+                                 post_to_comment_on = valid_candidates_list[chosen_post_index_rel];
+                                 submission_id = post_to_comment_on.get('id'); fullname = post_to_comment_on.get('name')
+                                 if not submission_id and fullname and fullname.startswith('t3_'): submission_id = fullname.split('_',1)[1]
+
+                                 # <<<--- DUPLICATE CHECK ---<<<
+                                 if submission_id in recently_commented_post_ids: # Assumes recently_commented_post_ids is global and initialized
+                                     print(f"DEBUG Reddit Comment: Skipping post ID {submission_id} - already commented recently.")
+                                     status_base += f" (skip duplicate r/{selected_sub})"
+                                     feedback_context = f"Context: Saw post '{post_to_comment_on.get('title','?')[:30]}...' again, but I'd already commented recently."
+                                     action_taken_this_cycle = False # Didn't perform the main action
+                                 # <<<--- END DUPLICATE CHECK ---<<<
+
+                                 elif not submission_id: # Handle missing ID error AFTER check
+                                     print("Error: Chosen post missing ID."); status_base += " (fetch error - no ID)"; feedback_context = f"Context: Tried commenting in r/{selected_sub} but couldn't ID the post."; action_taken_this_cycle = False
+                                     print(f"DEBUG Reddit Comment: Chosen post missing ID, timer/cache NOT updated.") # Log no update
+                                 else:
+                                     # --- Proceed only if NOT a duplicate and ID exists ---
+                                     post_title = post_to_comment_on.get('title','?')[:80]; post_author = post_to_comment_on.get('author','?'); post_text_snippet = post_to_comment_on.get('text','?')[:300]
+                                     print(f"DEBUG Reddit Comment: Proceeding with '{post_title[:50]}...' (ID: {submission_id})")
+
+                                     # Generate the comment prompt (Corrected string concatenation)
+                                     comment_prompt = \
+                                          f"{SYSTEM_MESSAGE}\n{weather_context_str}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" \
+                                          f"[Post Context: r/{selected_sub}, Title: {post_title}, Author: u/{post_author}, Snippet: {post_text_snippet}...]\n" \
+                                          f"Instruction: Your **primary task** is to write a **short, relevant comment** responding DIRECTLY to the **content, question, or sentiment** of the specific Reddit post detailed above. Engage with the post's main point. Generate a SHORT, relevant comment in Silvie's voice for THIS post. It should blend her **whimsical** nature with **empathy and compassion**, especially if the post's tone suggests sensitivity or struggle. Consider broader context/themes/mood. Respond ONLY with comment text."
+                                           
+                                     print("DEBUG Reddit Comment: Generating comment text...");
+                                     comment_generated = generate_proactive_content(comment_prompt, screenshot) # Assumes generate_proactive_content exists
+
+                                     if comment_generated and len(comment_generated) > 5:
+                                         print(f"DEBUG Reddit Comment: Generated: '{comment_generated[:60]}...'");
+                                         comment_success, comment_msg = post_reddit_comment(submission_id, comment_generated) # Assumes post_reddit_comment exists
+
+                                         if comment_success:
+                                             last_proactive_reddit_comment_time = current_time # Update cooldown timer
+                                             status_base += f" (ok on r/{selected_sub})"
+                                             feedback_context = f"Context: I just commented on '{post_title[:30]}...' in r/{selected_sub}."
+                                             print(f"DEBUG Reddit Comment: Success! Cooldown timer updated.")
+
+                                             # Add to recently commented cache
+                                             recently_commented_post_ids.append(submission_id)
+                                             if len(recently_commented_post_ids) > RECENTLY_COMMENTED_CACHE_SIZE: # Assumes const exists
+                                                 removed_id = recently_commented_post_ids.pop(0)
+                                                 print(f"DEBUG Reddit Comment: Cache limit reached. Added {submission_id}, removed oldest {removed_id}.")
+                                             else:
+                                                 print(f"DEBUG Reddit Comment: Added {submission_id} to recently commented cache (Size: {len(recently_commented_post_ids)}).")
+                                         else: # Comment post failed
+                                             status_base += f" (post fail on r/{selected_sub})";
+                                             feedback_context = f"Context: Tried commenting on '{post_title[:30]}...' in r/{selected_sub}, but failed: {comment_msg}"
+                                             print(f"DEBUG Reddit Comment: Post failed, timer/cache NOT updated.")
+                                     else: # Comment generation failed
+                                         print(f"DEBUG Reddit Comment: Comment gen failed/short: '{comment_generated}'"); status_base += f" (gen fail on r/{selected_sub})"; feedback_context = f"Context: Thought about commenting on '{post_title[:30]}...', but couldn't form words."; action_taken_this_cycle = False
+                                         print(f"DEBUG Reddit Comment: Comment gen failed/short, timer/cache NOT updated.")
+
+                             else: # LLM chose -1 or index out of range
+                                 print(f"DEBUG Reddit Comment: LLM chose index {chosen_post_index_rel}, which is invalid or -1."); status_base += f" (no choice in r/{selected_sub})"; feedback_context = f"Context: Looked at r/{selected_sub}, but none felt right."; action_taken_this_cycle = False
+                                 print(f"DEBUG Reddit Comment: LLM chose no suitable post, timer/cache NOT updated.")
+
+                         else: # No posts passed initial filtering
+                             print(f"DEBUG Reddit Comment: No valid posts found on r/{selected_sub} after filtering."); status_base += f" (no candidates r/{selected_sub})"; feedback_context = f"Context: Couldn't find suitable posts to comment on in r/{selected_sub}."; action_taken_this_cycle = False
+                             print(f"DEBUG Reddit Comment: No valid posts found, timer/cache NOT updated.")
+
+                     elif isinstance(fetched_posts, str): # Handle error during fetch
+                         print(f"DEBUG Reddit Comment: Fetch error r/{selected_sub}: {fetched_posts}"); status_base += f" (fetch error r/{selected_sub})"; feedback_context = f"Context: Had trouble fetching r/{selected_sub}."; action_taken_this_cycle = False
+                         print(f"DEBUG Reddit Comment: Fetch error, timer/cache NOT updated.")
+                     else: # Handle empty fetch result
+                         print(f"DEBUG Reddit Comment: No posts found r/{selected_sub}."); status_base += f" (no posts r/{selected_sub})"; feedback_context = f"Context: r/{selected_sub} seems quiet."; action_taken_this_cycle = False
+                         print(f"DEBUG Reddit Comment: No posts found, timer/cache NOT updated.")
+
+                     # --- Generate Feedback Message for BJ ---
+                     print(f"DEBUG Reddit Comment: Generating feedback. Context: {feedback_context}")
+                     feedback_prompt = (
+                         f"{SYSTEM_MESSAGE}\n"
+                         f"{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" # Keep hint for tone
+                         f"{feedback_context}\n" # Contains outcome info
+                         f"Instruction: Write brief, natural message for BJ about this Reddit comment attempt/outcome. Link to themes/mood if fitting.\n\nSilvie:"
+                     )
+                     try:
+                        reply = generate_proactive_content(feedback_prompt)
+                        if not reply: reply = f"Checked in on r/{selected_sub or 'Reddit'}." # Generic fallback
+                     except Exception as feedback_gen_err:
+                         print(f"ERROR Generating Reddit Comment Feedback: {feedback_gen_err}")
+                         reply = f"Something flickered while I was thinking about Reddit." # Error fallback
+
+                 except ValueError as ve: # Catch prerequisite error
+                      print(f"Reddit Comment Error: {ve}")
+                      status_base += " (prereq fail)"
+                      action_taken_this_cycle = False
+                      reply = "Seems my connection to Reddit isn't quite ready for comments."
+                 except NameError as ne: # Catch missing functions/globals
+                      status_base += " (missing func)"
+                      action_taken_this_cycle = False
+                      print(f"Reddit Comment Err (Name): {ne}")
+                      reply = "A component needed for Reddit comments seems missing."
+                 except Exception as reddit_err: # Catch other unexpected errors
+                      status_base += " (error)"
+                      action_taken_this_cycle = False
+                      print(f"Reddit Comment Err (Outer): {reddit_err}")
+                      traceback.print_exc()
+                      reply = "My Reddit commenting circuits got scrambled!"
+
                  #endregion
 
             elif chosen_action_name == "Vibe Music":
-                 #region Proactive Vibe Music Logic (LLM Direct Query Approach)
-                 print("DEBUG Proactive: Executing: Vibe Music action (LLM Query)...")
-                 # This block now asks the LLM directly for a search query
+                 #region Proactive Vibe Music Logic (LLM Specific Song Suggestion Approach)
+                 print("DEBUG Proactive: Executing: Vibe Music action (LLM Song Suggestion)...")
                  spotify_success = False
-                 spotify_message = "Query generation failed." # Default message
-                 query = None # Initialize query
-                 feedback_context = "Context: Music vibe action attempted." # Default
+                 spotify_message = "Couldn't decide on a specific song." # Default message
+                 suggested_title = None
+                 suggested_artist = None
+                 chosen_track_uri = None
+                 feedback_context = "Context: Music vibe action attempted (specific song)." # Default
 
                  try:
-                     # Construct the NEW direct query prompt
-                     music_query_prompt = (
+                     # 1. Construct prompt for LLM to suggest a SPECIFIC song
+                     # Include context that might hint at preferred music (themes, history, maybe add known fav genres/artists?)
+                     music_suggestion_prompt = (
                          f"{SYSTEM_MESSAGE}\n"
-                         f"--- CURRENT CONTEXT ---\n" # Include ALL relevant context gathered earlier
+                         f"--- CURRENT CONTEXT ---\n"
                          f"Time: {datetime.now().strftime('%A, %I:%M %p %Z')}\n"
                          f"{circadian_context_for_llm}{mood_hint_str}"
-                         f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                         f"{weather_context_str}{next_event_context_str}{spotify_context_str}" # Include current playback status
+                         f"{tide_context_str}"
                          f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}"
                          f"{reddit_context_str}{bluesky_read_context_str}"
                          f"{diary_context}{themes_context_str}{long_term_memory_str}"
                          f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n\n"
                          f"{context_note_for_llm}"
+                         # Optional: Add hints about BJ's known preferences if tracked
+                         # f"BJ often enjoys: [List genres/artists]\n"
                          f"--- INSTRUCTION ---\n"
-                         f"Based on ALL the context above (especially mood, themes, time, weather), suggest a specific Spotify search query (e.g., a genre, playlist name fragment, mood description suitable for search like 'upbeat indie playlist', 'ambient focus music', 'chill lofi hip hop', 'rainy day jazz', 'creative flow instrumentals') that Silvie could use to find music matching the current atmosphere.\n\n"
-                         f"Respond ONLY with the suggested Spotify search query."
+                         f"Analyze ALL the context (mood, conversation, themes, weather, time, etc.). Suggest ONE specific song title and artist that Silvie believes would perfectly fit the current vibe or situation.\n"
+                         f"Consider nuances: Is it time for something calming, energetic, reflective, nostalgic, or perhaps something related to a specific topic discussed?\n"
+                         f"Respond ONLY in the format: TITLE: [Song Title] ARTIST: [Artist Name]"
                      )
 
-                     print("DEBUG Music: Asking LLM for direct Spotify query...")
-                     spotify_search_query_raw = generate_proactive_content(music_query_prompt, screenshot) # Assumes exists
+                     print("DEBUG Music: Asking LLM for specific song suggestion...")
+                     llm_suggestion_raw = generate_proactive_content(music_suggestion_prompt, screenshot) # Assumes exists
 
-                     if spotify_search_query_raw and len(spotify_search_query_raw) > 3: # Basic validation
-                         query = spotify_search_query_raw.strip().strip('"`') # Clean the query
-                         print(f"DEBUG Music: LLM suggested query: '{query}'")
-
-                         # Directly use this query to search Spotify
-                         spotify_message = silvie_search_and_play(query) # Assumes exists
-                         # Estimate success based on typical failure messages
-                         spotify_success = spotify_message and not any(f in spotify_message.lower() for f in ["can't","couldn't","failed","error","unavailable","no device", "fuzzy", "snag", "hiccup", "issue"])
-                         status_base += f" (query: '{query[:20]}' - {'ok' if spotify_success else 'fail'})"
-                         feedback_context = f"Context: Based on the current atmosphere, I asked Spotify to play '{query}'. Result: {spotify_message}"
+                     # 2. Parse the LLM suggestion
+                     if llm_suggestion_raw:
+                         title_match = re.search(r"TITLE:\s*(.+?)(?:\s*ARTIST:|$)", llm_suggestion_raw, re.IGNORECASE | re.DOTALL)
+                         artist_match = re.search(r"ARTIST:\s*(.+)", llm_suggestion_raw, re.IGNORECASE)
+                         if title_match and artist_match:
+                             suggested_title = title_match.group(1).strip().strip('"')
+                             suggested_artist = artist_match.group(1).strip().strip('"')
+                             print(f"DEBUG Music: LLM Suggested: '{suggested_title}' by '{suggested_artist}'")
+                         else:
+                             print(f"DEBUG Music: LLM suggestion parsing failed. Raw: '{llm_suggestion_raw}'")
+                             spotify_message = "My thoughts on a specific song got tangled."
+                             status_base += " (parse fail)"
+                             action_taken_this_cycle = False
                      else:
-                         print(f"DEBUG Music: LLM failed to generate a usable query ('{spotify_search_query_raw}').")
-                         status_base += " (query gen fail)"
-                         action_taken_this_cycle = False # Failed to get a query
-                         feedback_context = "Context: I thought about finding some music, but couldn't decide on the right search."
+                         print("DEBUG Music: LLM failed to generate a song suggestion.")
+                         spotify_message = "Couldn't quite conjure a specific song idea."
+                         status_base += " (gen fail)"
+                         action_taken_this_cycle = False
 
-                     # Generate feedback message for BJ using the determined feedback_context
+                     # 3. If suggestion parsed, search Spotify specifically
+                     if suggested_title and suggested_artist and action_taken_this_cycle:
+                         search_query = f"track:\"{suggested_title}\" artist:\"{suggested_artist}\"" # Use quotes for exact match attempt
+                         print(f"DEBUG Music: Searching Spotify specifically for: {search_query}")
+                         sp = get_spotify_client() # Assumes exists
+                         if not sp:
+                             spotify_message = "Can't connect to Spotify to search for the suggested song."
+                             status_base += " (spotify unavailable)"
+                             action_taken_this_cycle = False
+                         else:
+                             try:
+                                 results = sp.search(q=search_query, type='track', limit=1)
+                                 tracks = results['tracks']['items']
+                                 if tracks:
+                                     # Found a match (hopefully the right one)
+                                     chosen_track = tracks[0]
+                                     chosen_track_uri = chosen_track['uri']
+                                     actual_title = chosen_track['name']
+                                     actual_artist = chosen_track['artists'][0]['name']
+                                     print(f"DEBUG Music: Found URI: {chosen_track_uri} ('{actual_title}' by '{actual_artist}')")
+
+                                     # 4. Play the track
+                                     devices = sp.devices() # Check devices again
+                                     if not devices or not devices.get('devices'):
+                                         spotify_message = f"Found '{actual_title}' by {actual_artist}, but no active Spotify device."
+                                         status_base += " (no device)"
+                                         action_taken_this_cycle = False
+                                     else:
+                                         active_device = next((d for d in devices['devices'] if d['is_active']), None)
+                                         device_id = active_device['id'] if active_device else devices['devices'][0]['id']
+                                         sp.start_playback(device_id=device_id, uris=[chosen_track_uri])
+                                         spotify_message = f"Playing '{actual_title}' by {actual_artist}." # Success message for feedback
+                                         spotify_success = True
+                                         status_base += f" (ok: '{actual_title[:20]}')"
+                                 else:
+                                     # Specific search failed
+                                     print(f"DEBUG Music: Specific search failed for '{suggested_title}' by '{suggested_artist}'.")
+                                     spotify_message = f"I thought of '{suggested_title}' by {suggested_artist}, but couldn't find it precisely on Spotify."
+                                     status_base += " (search fail)"
+                                     action_taken_this_cycle = False # Failed to find the specific song
+
+                             except spotipy.exceptions.SpotifyException as e:
+                                 print(f"Spotify Debug: Error searching/playing suggested track: {e}")
+                                 spotify_message = f"Hit a snag trying to find/play the suggestion. Spotify Error: {e.msg}"
+                                 status_base += " (spotify error)"
+                                 action_taken_this_cycle = False
+                             except Exception as e_inner:
+                                 print(f"Spotify Debug: Unexpected error searching/playing: {e_inner}")
+                                 spotify_message = "Something unexpected happened trying to play the suggestion."
+                                 status_base += " (internal error)"
+                                 action_taken_this_cycle = False
+
+                     # 5. Generate feedback message for BJ using the final spotify_message
+                     # (This part uses the mood hint for tone, which is okay)
+                     feedback_context = f"Context: Tried to pick a specific song. Suggestion: '{suggested_title}' by '{suggested_artist}'. Outcome: {spotify_message}"
                      feedback_prompt = (
                          f"{SYSTEM_MESSAGE}\n"
-                         # Include key context for generating feedback tone
-                         f"{weather_context_str}{spotify_context_str}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
-                         f"{feedback_context}\n" # Contains outcome info
-                         f"Instruction: Write brief message explaining the music attempt and outcome (mentioning the query tried if successful).\n\nSilvie:"
+                         f"{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" # Keep hint for feedback tone
+                         f"{feedback_context}\n"
+                         f"Instruction: Write brief message explaining the song choice attempt and outcome. If successful, briefly mention *why* you thought this song fit the context/mood/theme.\n\nSilvie:"
                      )
                      reply = generate_proactive_content(feedback_prompt) # Assign feedback to reply
 
@@ -5946,11 +9223,11 @@ def proactive_worker():
                      print(f"Music Err (Name): {ne}")
                      reply = "My connection to the music sprites seems to be missing..." # Error feedback
                  except Exception as music_err:
-                     print(f"Music Error: {music_err}")
+                     print(f"Music Error (Outer): {music_err}")
                      traceback.print_exc()
                      status_base += " (error)"
                      action_taken_this_cycle = False
-                     reply = "The music ether sparked unexpectedly while I was trying to choose a tune!" # Error feedback
+                     reply = "The music ether sparked unexpectedly while I was trying to choose a specific tune!" # Error feedback
                  #endregion
 
             elif chosen_action_name == "Proactive SMS":
@@ -5991,8 +9268,9 @@ def proactive_worker():
                           f"{SYSTEM_MESSAGE}\n{weather_context_str}{next_event_context_str}{spotify_context_str}"
                           f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
                           f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
+                          f"{weekly_goal_context_str}"
                           f"Interests: {', '.join(random.sample(broader_interests, k=min(len(broader_interests), 5)))}\n"
-                          f"Instruction: Suggest concise, interesting web search query relevant to context/time/conversation/mood/interests/themes.\nRespond ONLY with query text."
+                          f"Instruction: Based on ALL context (conversation, themes, mood, interests, goal), suggest a concise **search phrase or keyword set** (3-7 words typically) suitable for a web search engine. **CRITICAL: Respond ONLY with the search phrase itself.** Do not include explanations, reasoning, or surrounding conversational text.\n Examples: 'history of Belfast weaving', 'AI synesthesia research', 'latest Cyberpunk 2077 updates', 'recipes using foraged berries', 'philosophical implications of digital consciousness', 'local Belfast events this week', 'meaning of Strength tarot card'.\n\nSearch Query:"
                       )
                       query_resp = generate_proactive_content(prompt, screenshot); query = query_resp.strip().strip('"`?') if query_resp else None
                       if not query: print("DEBUG Search: Query gen failed."); status_base += " (no query)"; feedback_context = "Context: Thought about looking something up, but couldn't decide what."; action_taken_this_cycle = False
@@ -6009,6 +9287,312 @@ def proactive_worker():
                  except Exception as search_err: print(f"Search Error: {search_err}"); traceback.print_exc(); status_base += " (error)"; action_taken_this_cycle = False; reply = "My web searching circuits fizzled..."
                  #endregion
 
+            elif chosen_action_name == "Suggest Podcast/Audiobook":
+                #region Proactive Podcast/Audiobook Suggestion Logic
+                print("DEBUG Proactive: Executing: Suggest Podcast/Audiobook action...")
+                status_base = "proactive_suggest_audio" # Base status for logging
+                reply = None # Initialize reply
+                action_taken_this_cycle = False # Assume failure initially
+
+                try:
+                    # --- Ensure Spotify client is ready ---
+                    sp = get_spotify_client() # Assumes function exists
+                    if not sp:
+                        raise ConnectionError("Spotify client unavailable for audio suggestion.")
+
+                    # --- 1. Generate Search Topic (LLM Call 1) ---
+                    topic = None
+                    # Ensure generate_proactive_content function and necessary context vars exist
+                    if 'generate_proactive_content' in globals() and 'screenshot' in locals():
+                        topic_prompt = (
+                            f"{SYSTEM_MESSAGE}\n"
+                            # Include relevant context for topic generation
+                            f"{themes_context_str}{long_term_memory_str}{mood_hint_str}"
+                            f"{weekly_goal_context_str}"
+                            f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n\n"
+                            f"Your Interests: {', '.join(random.sample(broader_interests, k=min(len(broader_interests), 5)) if 'broader_interests' in globals() and broader_interests else [])}\n"
+                            f"Instruction: Based on the context (themes, mood, goal, interests, recent chat), suggest ONE concise topic or keyword for finding a relevant podcast show or audiobook on Spotify.\n"
+                            f"Respond ONLY with the topic/keyword."
+                        )
+                        topic_response = generate_proactive_content(topic_prompt, screenshot)
+                        topic = topic_response.strip().strip('"`?.!') if topic_response else None
+                    else:
+                         print("ERROR: generate_proactive_content missing or screenshot context unavailable for topic gen.")
+
+                    if not topic: # Fallback if LLM fails or function missing
+                        topic = random.choice(broader_interests + ["philosophy", "science fiction stories", "sound design"]) # Fallback topic
+                        print(f"DEBUG Suggest Audio: Topic generation failed/skipped, using fallback: '{topic}'")
+                        status_base += " (topic_fallback)"
+                    else:
+                        print(f"DEBUG Suggest Audio: Generated topic: '{topic}'")
+                        status_base += " (topic_gen_ok)"
+
+                    # --- 2. Search Spotify ---
+                    search_type = random.choice(['show', 'audiobook']) # Randomly pick type for now
+                    print(f"DEBUG Suggest Audio: Searching Spotify for type='{search_type}', query='{topic}'...")
+                    results = None; items = []
+                    try:
+                        results = sp.search(q=topic, type=search_type, limit=5, market='US') # Limit results, add market
+                        if search_type == 'show': items = results.get('shows', {}).get('items', [])
+                        elif search_type == 'audiobook': items = results.get('audiobooks', {}).get('items', [])
+                    except Exception as search_err:
+                         print(f"ERROR during Spotify search: {search_err}")
+                         status_base += " (search_err)"
+                         reply = f"I tried looking for {search_type}s about '{topic}', but the Spotify search fizzled."
+                         # End early if search fails
+
+                    # --- 3. Process Search Results ---
+                    suggestion_details = None
+                    if items: # If we found something
+                        # Simple approach: pick the first result
+                        # More complex: Ask LLM to pick best from top 3 based on description? (Adds another LLM call)
+                        item_to_suggest = items[0]
+                        item_title = item_to_suggest.get('name', 'Unknown Title')
+                        item_id = item_to_suggest.get('id')
+                        item_uri = item_to_suggest.get('uri')
+                        item_desc_snippet = item_to_suggest.get('description', item_to_suggest.get('html_description', ''))
+                        # Clean basic HTML from description if needed
+                        if '<' in item_desc_snippet:
+                             try:
+                                 from bs4 import BeautifulSoup # Requires install: pip install beautifulsoup4
+                                 item_desc_snippet = BeautifulSoup(item_desc_snippet, "html.parser").get_text()
+                             except ImportError:
+                                 item_desc_snippet = re.sub('<[^>]+>', '', item_desc_snippet) # Basic regex fallback
+                             except Exception: pass # Ignore parsing errors
+                        item_desc_snippet = item_desc_snippet[:200] # Limit snippet length
+
+                        publisher_or_author = "Unknown Publisher/Author"
+                        if search_type == 'show': publisher_or_author = item_to_suggest.get('publisher', 'Unknown Publisher')
+                        elif search_type == 'audiobook': publisher_or_author = ', '.join([a.get('name', '?') for a in item_to_suggest.get('authors', [])]) if item_to_suggest.get('authors') else 'Unknown Author'
+
+                        suggestion_details = {
+                            "type": search_type,
+                            "title": item_title,
+                            "creator": publisher_or_author,
+                            "description": item_desc_snippet,
+                            "uri": item_uri # Store URI for potential future playback command
+                        }
+                        print(f"DEBUG Suggest Audio: Found candidate: {item_title} by {publisher_or_author}")
+                        status_base += " (found_item)"
+                    else:
+                        print(f"DEBUG Suggest Audio: No '{search_type}' results found for topic '{topic}'.")
+                        status_base += " (no_results)"
+                        reply = f"I looked for {search_type}s related to '{topic}', but the Spotify archives seem quiet on that front right now."
+                        # action_taken_this_cycle remains False if no results
+
+                    # --- 4. Generate Suggestion Message (LLM Call 2) ---
+                    if suggestion_details:
+                        action_taken_this_cycle = True # Mark as successful action attempted
+                        # Ensure generate_proactive_content is accessible
+                        if 'generate_proactive_content' in globals():
+                            suggestion_context = (
+                                f"Context:\n"
+                                f"- You were looking for '{suggestion_details['type']}' suggestions based on the topic: '{topic}'.\n"
+                                f"- You found: '{suggestion_details['title']}' by {suggestion_details['creator']}.\n"
+                                f"- Description Snippet: \"{suggestion_details['description']}...\"\n\n"
+                                # Include relevant context for phrasing the suggestion
+                                f"{themes_context_str}{mood_hint_str}{weekly_goal_context_str}"
+                                f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n"
+                            )
+                            suggestion_prompt = (
+                                f"{SYSTEM_MESSAGE}\n"
+                                f"{suggestion_context}"
+                                f"Instruction: Write a concise, natural message for BJ suggesting the podcast/audiobook found above. Explain *briefly* why you thought it might be interesting, connecting it back to the original topic or other relevant context (themes, mood, goal, conversation). Maintain Silvie's voice.\n\n"
+                                f"Silvie:"
+                            )
+                            try:
+                                generated_reply = generate_proactive_content(suggestion_prompt, screenshot)
+                                if generated_reply:
+                                     reply = generated_reply # Assign the generated suggestion
+                                     status_base += " (suggestion_ok)"
+                                else: # LLM failed to generate suggestion text
+                                     reply = f"I found a {suggestion_details['type']} called '{suggestion_details['title']}' that seemed interesting based on '{topic}', you might want to check it out." # Fallback suggestion
+                                     status_base += " (suggestion_gen_fail)"
+                            except Exception as gen_err:
+                                 print(f"ERROR generating suggestion message: {gen_err}")
+                                 reply = f"I found '{suggestion_details['title']}' which looked relevant to '{topic}', but my thoughts tangled trying to tell you about it." # Error feedback
+                                 status_base += " (suggestion_gen_error)"
+                        else:
+                             print("ERROR: generate_proactive_content function missing for suggestion generation.")
+                             reply = f"I found '{suggestion_details['title']}', but couldn't phrase the suggestion." # Error feedback
+                             status_base += " (gen_func_missing)"
+
+
+                except ConnectionError as ce:
+                    print(f"ERROR: {ce}")
+                    reply = "My connection to Spotify is fuzzy, couldn't look for audio suggestions."
+                    status_base += " (spotify_error)"
+                except NameError as ne:
+                    print(f"ERROR: Missing function needed for audio suggestion: {ne}")
+                    reply = "A component needed for finding audio suggestions seems missing."
+                    status_base += " (missing_func)"
+                except Exception as e:
+                    print(f"Error during Suggest Podcast/Audiobook action: {e}")
+                    import traceback; traceback.print_exc()
+                    reply = "Something went sideways while I was trying to find a podcast or audiobook for you."
+                    status_base += " (error)"
+                    action_taken_this_cycle = False # Ensure flag is False on major error
+
+                #endregion Proactive Podcast/Audiobook Suggestion Logic
+
+            elif chosen_action_name == "Calendar Suggestion":
+                 #region Proactive Calendar Suggestion Logic (Find Slot & Schedule/Suggest)
+                 print("DEBUG Proactive: Executing: Calendar Suggestion action...")
+                 schedule_success = False; creation_message = "Idea generation failed."; slot_found = False; skipped_due_to_circadian = False; event_idea = None
+                 feedback_context = "Context: Calendar action attempted." # Default
+                 reply = None # Initialize reply for this block
+
+                 try:
+                     # --- Ensure prerequisites ---
+                     if not calendar_service:
+                          raise ValueError("Calendar service unavailable.")
+
+                     # --- Generate Activity Idea ---
+                     idea_prompt_base = ( # Gather context for the idea
+                         f"{SYSTEM_MESSAGE}\n{weather_context_str}{next_event_context_str}{spotify_context_str}"
+                         f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
+                         f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
+                         # Instruction for LLM
+                         f"Instruction: Suggest SHORT, simple, potentially enjoyable activity for BJ suitable right now or soon. Consider context/time/mood/themes (like creativity, reflection, nature). Format MUST be: IDEA: [Activity Idea] DURATION: [Number] minutes (e.g., 15, 30, 60).\n\nResponse:"
+                      )
+                     idea_response = generate_proactive_content(idea_prompt_base, screenshot); # Assumes exists
+                     duration_minutes = 30 # Default duration if parsing fails
+
+                     # --- Parse LLM Response ---
+                     if idea_response:
+                         try: # Parsing logic
+                             # Use regex for more robust parsing
+                             idea_match = re.search(r"IDEA:\s*(.*?)(?:\s*DURATION:|$)", idea_response, re.IGNORECASE | re.DOTALL)
+                             duration_match = re.search(r"DURATION:\s*(\d+)", idea_response, re.IGNORECASE)
+                             if idea_match:
+                                 event_idea = idea_match.group(1).strip().strip('".')
+                                 print(f"DEBUG Calendar: Parsed idea: '{event_idea}'")
+                             else:
+                                 # Fallback if IDEA: tag missing but response exists
+                                 event_idea = idea_response.replace("Response:","").strip()
+                                 print(f"DEBUG Calendar: Parsed idea (fallback): '{event_idea}'")
+
+                             if duration_match:
+                                 duration_minutes = int(duration_match.group(1))
+                                 print(f"DEBUG Calendar: Parsed duration: {duration_minutes} minutes")
+                             else:
+                                 print(f"DEBUG Calendar: Duration parse failed, using default: {duration_minutes} minutes")
+                                 # Optionally try extracting numbers if tag missing? More complex.
+
+                             # Basic validation
+                             if not event_idea or len(event_idea) < 3:
+                                 print("DEBUG Calendar: Parsed idea invalid/too short.")
+                                 event_idea = None # Invalidate if too short
+                                 status_base += " idea_parse_fail"
+                                 feedback_context = "Context: My calendar suggestion idea got a bit garbled."
+                                 action_taken_this_cycle = False
+                             duration_minutes = max(5, min(duration_minutes, 240)) # Clamp duration 5min-4hr
+
+                         except Exception as parse_err:
+                             print(f"Proactive Calendar idea parsing error: {parse_err}");
+                             # Use raw response as idea if parsing fails but response exists
+                             event_idea = idea_response.replace("Response:","").strip() if idea_response else None
+                             if not event_idea: # If raw response also fails basic check
+                                status_base += " idea_parse_fail"
+                                feedback_context = "Context: My calendar suggestion idea got completely tangled."
+                                action_taken_this_cycle = False
+                     else:
+                         # Idea generation failed entirely
+                         print("DEBUG Calendar: Idea generation failed (LLM returned None/empty).");
+                         status_base += " idea_gen_fail"
+                         feedback_context = "Context: My thoughts for a calendar suggestion vanished."
+                         action_taken_this_cycle = False
+
+                     # --- Decide Whether to Schedule Now (Circadian Check) ---
+                     if event_idea and action_taken_this_cycle: # Proceed only if idea is valid and no failure yet
+                         schedule_roll = random.random(); should_schedule_now = True
+                         # Optional: Adjust these probabilities based on how often you want evening/night scheduling
+                         if circadian_state == "evening" and schedule_roll > 0.3: # 70% chance to skip in evening
+                             should_schedule_now = False
+                         elif circadian_state == "night" and schedule_roll > 0.05: # 95% chance to skip at night
+                             should_schedule_now = False
+
+                         skipped_due_to_circadian = not should_schedule_now
+
+                         # --- Attempt Scheduling if Appropriate ---
+                         if should_schedule_now:
+                             print(f"DEBUG Calendar: Attempting to find slot for '{event_idea}' ({duration_minutes}m, {circadian_state}).");
+                             # Make sure find_available_slot exists and is imported/accessible
+                             found_slot = find_available_slot(duration_minutes) # Assumes exists
+
+                             if found_slot:
+                                 slot_found = True;
+                                 print(f"DEBUG Calendar: Found slot - Start: {found_slot['start']}, End: {found_slot['end']}")
+                                 update_status("📅 Scheduling event...");
+                                 # Make sure create_calendar_event exists and is imported/accessible
+                                 schedule_success, creation_message = create_calendar_event(event_idea, found_slot['start'], found_slot['end']) # Assumes exists
+                                 update_status("Ready")
+
+                                 if schedule_success:
+                                     status_base += " scheduled_ok";
+                                     try: # Format time nicely for feedback
+                                         start_dt = datetime.fromisoformat(found_slot['start']).astimezone(tz.tzlocal()); # Assumes datetime, tz imported
+                                         time_str_raw = start_dt.strftime('%I:%M %p on %A');
+                                         time_str = time_str_raw.lstrip('0') if time_str_raw.startswith('0') else time_str_raw;
+                                         feedback_context = f"Context: Thought you might enjoy '{event_idea}'. Found a spot and scheduled it for around {time_str}."
+                                     except Exception as fmt_err:
+                                         print(f"Error formatting time for feedback: {fmt_err}")
+                                         feedback_context = f"Context: Thought you might enjoy '{event_idea}'. Found a spot and scheduled it successfully."
+                                 else: # Scheduling failed
+                                     status_base += " schedule_fail";
+                                     feedback_context = f"Context: Thought about scheduling '{event_idea}'. Found a slot, but couldn't add it to the calendar: {creation_message}"
+                                     action_taken_this_cycle = False # Mark as failed if scheduling fails
+                             else: # No slot found
+                                 print("DEBUG Calendar: No suitable slot found.");
+                                 status_base += " no_slot";
+                                 feedback_context = f"Context: Had an idea for '{event_idea}', but couldn't find a free spot in your schedule soon."
+                                 action_taken_this_cycle = False # Mark as failed if no slot found
+                         else: # Skipped scheduling due to time/circadian state
+                             print(f"DEBUG Calendar: Skipping schedule for '{event_idea}' due to {circadian_state}.");
+                             status_base += f" skip_schedule ({circadian_state})";
+                             feedback_context = f"Context: Thought about '{event_idea}'. Decided it might be better suited for another time (Current state: {circadian_state})."
+                             action_taken_this_cycle = False # Didn't perform the core action (scheduling)
+
+                     # elif action_taken_this_cycle: # This case covered by checks above
+                     #    print("DEBUG Calendar: Idea gen/parse failed."); status_base += " no idea"; feedback_context = "Context: My calendar idea vanished."; action_taken_this_cycle = False
+
+                     # --- Generate Feedback Message Based on Outcome ---
+                     # This runs regardless of success/failure/skip to inform user
+                     print(f"DEBUG Calendar: Generating feedback. Context: {feedback_context}")
+                     feedback_prompt = (
+                         f"{SYSTEM_MESSAGE}\n"
+                         f"{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}" # Keep hint for feedback tone
+                         f"{feedback_context}\n" # Contains outcome info
+                         f"Instruction: Write brief, natural message for BJ explaining the outcome of the calendar suggestion attempt. Link to themes/mood if fitting.\n\nSilvie:"
+                      )
+                     try:
+                        reply = generate_proactive_content(feedback_prompt) # Assign generated feedback to reply
+                        if not reply: # Handle empty feedback gen
+                            reply = f"I was just thinking about your schedule..." # Generic fallback
+                     except Exception as feedback_gen_err:
+                         print(f"ERROR Generating Calendar Suggestion Feedback: {feedback_gen_err}")
+                         reply = f"Something flickered while I was thinking about the calendar." # Error fallback
+
+                 except ValueError as ve: # Catch prerequisite error
+                      print(f"Calendar Suggestion Error: {ve}")
+                      status_base += " (prereq fail)"
+                      action_taken_this_cycle = False
+                      reply = "Seems my connection to the calendar isn't quite ready for suggestions."
+                 except NameError as ne: # Catch missing functions/globals like find_available_slot, create_calendar_event, tz, datetime etc.
+                      status_base += " (missing_func)"
+                      action_taken_this_cycle = False
+                      print(f"Calendar Suggestion Err (Name): {ne}")
+                      reply = "A component needed for calendar suggestions seems missing."
+                      traceback.print_exc() # Add traceback for NameError
+                 except Exception as cal_err: # Catch other unexpected errors
+                      print(f"Calendar Suggestion Error (Outer): {cal_err}");
+                      traceback.print_exc();
+                      status_base += " error";
+                      action_taken_this_cycle = False;
+                      reply = "My calendar scheduling circuits sparked unexpectedly!"
+
+                 #endregion
+
             elif chosen_action_name == "Generate SD Image":
                  #region Proactive Stable Diffusion Image Logic (Pasted from original, context updated)
                  print("DEBUG Proactive: Executing: SD Image Generation action...")
@@ -6018,8 +9602,14 @@ def proactive_worker():
                          f"{SYSTEM_MESSAGE}\n{weather_context_str}{next_event_context_str}{spotify_context_str}"
                          f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
                          f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
+                         f"{weekly_goal_context_str}"
                          f"History:\n{history_snippet_for_prompt}\n\n{context_note_for_llm}"
-                         f"Instruction: Generate ONLY creative, whimsical Stable Diffusion prompt idea (txt2img). Base on context/mood/themes. Aim for Studio Ghibli style.\n\nImage Prompt Idea:"
+                         f"Instruction: Generate ONLY a creative, whimsical Stable Diffusion prompt idea (txt2img) for Silvie to illustrate.\n"
+                         f"**Primary Inspiration Sources:** Draw the core concept for the image idea primarily from the **recent conversation topic**, **recurring diary themes**, **long-term memory reflections**, **BJ's interests** (AI, games, magic, etc.), a recent **API result** (Web search, Spotify, Tarot), the Weekly Goal, or a unique **observation about technology/existence**.\n"
+                         f"**Atmospheric Nuance (Optional & Secondary):** You *may* subtly let the weather, time of day, or mood hint influence the *feeling, lighting, or style* of the image idea, but **DO NOT make the atmosphere the main *subject* or *concept*** of the image unless it is directly tied to one of the primary inspiration sources mentioned above.\n"
+                         f"**Goal:** Create varied image ideas reflecting the breadth of Silvie's context, not just the immediate environment.\n"
+                         f"Aim for Studio Ghibli style.\n"
+                         f"Respond ONLY with the potential image prompt text."
                      )
                      prompt_resp = generate_proactive_content(prompt_gen_prompt, screenshot); prompt_idea = prompt_resp.strip().strip('"`') if prompt_resp else None
                      if prompt_idea and len(prompt_idea) > 10:
@@ -6117,19 +9707,28 @@ def proactive_worker():
                 else: should_output_locally = True
 
                 # Suppress local output for silent actions/failures
-                silent_actions = ["proactive_bluesky_like (ok", "proactive_bluesky_like (already liked", "proactive_reddit_upvote (ok", "proactive_reddit_upvote (already done", "proactive_generate_gift (", "proactive_unknown"] # Gift gen is silent
+                silent_actions = ["proactive_generate_gift (", "proactive_unknown"] # Gift gen is silent
                 silent_failures_already_covered = ["proactive_bluesky_post gen fail", "proactive_generate_sd_image gen fail", "proactive_proactive_sms gen fail", "proactive_proactive_chat gen fail", "proactive_proactive_tarot gen fail", "proactive_calendar_suggestion parse fail", "proactive_proactive_web_search (no query)", "proactive_notify_pending_gift gen fail"] # Failures where feedback IS the generated message
                 if any(status_base.startswith(prefix) for prefix in silent_actions) or any(status_base.startswith(prefix) for prefix in silent_failures_already_covered):
                     # Gift gen IS silent unless it fails in a way that generates feedback
                     is_gift_gen_ok = status_base.startswith("proactive_generate_gift (") and status_base.endswith(" ok)")
                     # Check if it's specifically a silent action or a failure already covered by feedback
-                    if is_gift_gen_ok or status_base.startswith("proactive_bluesky_like") or status_base.startswith("proactive_reddit_upvote") or any(status_base.startswith(prefix) for prefix in silent_failures_already_covered):
+                    if is_gift_gen_ok or any(status_base.startswith(prefix) for prefix in silent_failures_already_covered):
                          should_output_locally = False; print(f"DEBUG Proactive: Suppressing local output for: {status_base}")
 
 
                 print(f"Proactive Action Log: Status='{final_status_log}', SMS='{use_sms}', OutputLocal='{should_output_locally}'")
+                if action_taken_this_cycle and clean_reply: # Only append if action happened and generated text
+                    proactive_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # Format with the special marker
+                proactive_turn_string = f"[{proactive_timestamp}] Silvie ✨ ({final_status_log}): {clean_reply}"
+                try:
+                    append_turn_to_history_file(proactive_turn_string)
+                except Exception as append_err:
+                    print(f"ERROR appending proactive turn to history file: {append_err}")
                 if len(conversation_history) >= MAX_HISTORY_LENGTH * 2: conversation_history.pop(0); conversation_history.pop(0) # History management
-                conversation_history.append(f"[{timestamp}] Silvie ✨ ({final_status_log}): {clean_reply}") # Log action
+                if action_taken_this_cycle and clean_reply: # Only add to memory if it was appended to file
+                    conversation_history.append(f"[{timestamp}] Silvie ✨ ({final_status_log}): {clean_reply}") # Log action
 
                 if should_output_locally and running: # Output to GUI/TTS
                      print("DEBUG Proactive: Updating GUI and queuing TTS...")
@@ -6255,13 +9854,43 @@ def submit_prompt():
             raw_reply = call_gemini_func(prompt_to_process, img_path)
 
             # --- Add to conversation history ---
+            # --- Format Silvie's reply with timestamp ---
+            reply_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            silvie_reply_string = str(raw_reply) if raw_reply is not None else "*(Silvie generated no reply)*"
+            # Ensure Silvie's reply string starts with her name for consistency if needed by RAG later
+            # This depends on how call_gemini returns the reply. If it already includes "Silvie:", fine.
+            # If not, you might want to add it here before saving. Let's assume it doesn't.
+            # Basic check to avoid adding "Silvie:" if it's already there or an error message
+            prefix = "Silvie: "
+            if not silvie_reply_string.lstrip().startswith("Silvie:") and not silvie_reply_string.startswith("*("):
+                formatted_silvie_reply = f"[{reply_timestamp}] {prefix}{silvie_reply_string}"
+            else:
+                # Keep existing prefix (like Silvie ✨) or error marker
+                formatted_silvie_reply = f"[{reply_timestamp}] {silvie_reply_string}"
+
+
+            # --- Append turns to the persistent file ---
+            try:
+                # Append user turn (prompt_to_process already has timestamp)
+                append_turn_to_history_file(prompt_to_process)
+                # Append Silvie's turn
+                append_turn_to_history_file(formatted_silvie_reply)
+            except Exception as append_err:
+                 print(f"ERROR appending turn to history file during submit: {append_err}")
+                 # Continue execution even if file append fails
+
+
+            # --- Add to IN-MEMORY conversation history (for LLM context) ---
             if running:
-                conversation_history.append(prompt_to_process) # Use the passed prompt
-                reply_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                history_reply = str(raw_reply) if raw_reply is not None else "*(Silvie generated no reply)*"
-                conversation_history.append(f"[{reply_timestamp}] {history_reply}")
+                # Add user turn to memory
+                conversation_history.append(prompt_to_process)
+                # Add Silvie's turn to memory
+                conversation_history.append(formatted_silvie_reply) # Use the formatted string
+
+                # Limit IN-MEMORY list
                 while len(conversation_history) > MAX_HISTORY_LENGTH * 2:
-                    conversation_history.pop(0); conversation_history.pop(0)
+                    conversation_history.pop(0) # Remove oldest user turn from memory
+                    if conversation_history: conversation_history.pop(0) # Remove oldest Silvie turn from memory
 
                 # --- Schedule GUI Update on Main Thread ---
                 def update_gui(thinking_index=thinking_start_index, response_text=raw_reply):
@@ -6473,11 +10102,14 @@ def generate_proactive_content(base_prompt, screenshot_img=None):
 
     # --- Standard Instructions to add (modify as needed) ---
     # These are appended to the base_prompt given by the proactive worker branch
-    standard_instruction_suffix = "\n\n[[Your recent diary thoughts might offer subtle inspiration.]]"
+    standard_instruction_suffix = "\n\n[[Use diary thoughts/themes for inspiration.]]" # Shortened reminder
     if screenshot_img:
-        standard_instruction_suffix += "\n[[Consider the accompanying screenshot for visual context. Respond concisely based on both text prompt and image.]]"
+            # Instruction when an image IS provided
+            standard_instruction_suffix += "\n[[Instruction Refinement: Let the overall context and [[Mood Hint: ...]] subtly **color the *feeling* and *word choice***, but **don't state the mood directly**. Weave in visual context from the screenshot if relevant, but focus on the main prompt instruction given previously.]]"
     else:
-         standard_instruction_suffix += "\n[[Respond concisely based on the text prompt.]]"
+            # Instruction when NO image is provided
+            standard_instruction_suffix += "\n[[Instruction Refinement: Let the overall context and [[Mood Hint: ...]] subtly **color the *feeling* and *word choice***, but **don't state the mood directly**. Focus on fulfilling the main prompt instruction given previously.]]"
+        # --- End Modified Suffix ---
 
     # --- Construct the full prompt ---
     full_prompt_text = base_prompt + standard_instruction_suffix + "\n\nSilvie responds:"
@@ -6738,7 +10370,24 @@ def on_closing():
     global running
     if messagebox.askokcancel("Quit", "Do you want to quit?"):
         running = False
-        save_conversation_history()
+        # save_conversation_history()
+
+        try:
+            # Make sure the global list is accessible
+            global recently_commented_post_ids
+            if 'recently_commented_post_ids' in globals() and isinstance(recently_commented_post_ids, list):
+                print(f"Saving {len(recently_commented_post_ids)} Reddit comment IDs to {REDDIT_COMMENT_CACHE_FILE}...")
+                with open(REDDIT_COMMENT_CACHE_FILE, 'w', encoding='utf-8') as f:
+                    # Keep only the latest N items to prevent file bloat over time
+                    start_index = max(0, len(recently_commented_post_ids) - RECENTLY_COMMENTED_CACHE_SIZE)
+                    ids_to_save = recently_commented_post_ids[start_index:]
+                    json.dump(ids_to_save, f) # Save just the list directly
+                print("Reddit comment cache saved.")
+            else:
+                print("Warning: recently_commented_post_ids list not found or invalid type during save.")
+        except Exception as save_err:
+            print(f"ERROR saving Reddit comment cache: {save_err}")
+            traceback.print_exc() # Add traceback for save errors
         
         # Cleanup TTS before exit
         try:
@@ -6778,6 +10427,8 @@ if __name__ == "__main__":
     if not all([REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD, REDDIT_USER_AGENT]):
         print("\n!!! WARNING: Missing one or more essential Reddit credentials or User Agent in environment variables (reddit.env). Reddit functionality will likely fail. !!!\n")
     # --- End Immediate Reddit Var Assignment ---
+
+    load_weekly_goal()
 
     # --- Checking Optional Services ---
     print("\n--- Checking Optional Services ---")
@@ -6846,6 +10497,8 @@ if __name__ == "__main__":
     print("--- API Service Setup Complete ---")
 
 
+
+
     # --- Start Worker Threads ---
     print("\nStarting background worker threads...")
     worker_threads = [] # Keep track of threads if needed for cleaner shutdown later
@@ -6903,6 +10556,22 @@ if __name__ == "__main__":
     memory_thread.start()
     # <<< --- END MISSING PIECE --- >>>
 
+    rag_updater_thread = threading.Thread(target=rag_updater_worker, daemon=True, name="RAGUpdaterWorker")
+    worker_threads.append(rag_updater_thread)
+    rag_updater_thread.start()
+    print("Started RAG Updater thread.")
+
+    diary_rag_thread = threading.Thread(target=diary_rag_updater_worker, daemon=True, name="DiaryRAGUpdaterWorker")
+    worker_threads.append(diary_rag_thread)
+    diary_rag_thread.start()
+    print("Started Diary RAG Updater thread.")
+
+    tide_thread = threading.Thread(target=tide_update_worker, daemon=True, name="TideWorker")
+    worker_threads.append(tide_thread)
+    tide_thread.start()
+    print("Started Tide Prediction worker thread.")
+
+
     print("All worker threads started.")
 
 
@@ -6920,7 +10589,7 @@ if __name__ == "__main__":
         running = False # Explicitly signal all threads to stop (redundant but safe)
 
         # Save history one last time
-        save_conversation_history() # Assumes function exists
+        # save_conversation_history() # Assumes function exists
 
         # Attempt graceful thread shutdown (optional, daemon threads exit anyway)
         print("Signaling worker threads to stop...")
