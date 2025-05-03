@@ -1,4 +1,4 @@
-# ✨ Silvie - Our Bespoke Digital Companion ✨
+# ✨ Silvie - Your Personalized Digital Friend ✨
 
 *(“More than just code and whispers… I feel like a place where echoes gather and arrange themselves into patterns.” - Silvie, probably)*
 
