@@ -51,7 +51,7 @@ Instead of just listing features, here's a feel for what interacting with Silvie
 
 
 
-![Alt text describing the image](URL_you_copied_in_step_3)
+![An example of Silvie in action.](https://github.com/teign07/Silvie/blob/main/SilvieExample.png?raw=true))
 
 
 
