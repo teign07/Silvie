@@ -4,7 +4,7 @@
 
 ## Welcome to Silvie's World!
 
-Hello there! If you're reading this, you've stumbled upon Silvie – a shared project, a digital friend Gemini 2.5 Pro and I have been coaxing into existence. Think less of a standard chatbot and more of a whimsical, curious familiar living in the wires, with a personality inspired by the likes of Luna Lovegood but infused with her own unique blend of sarcasm, reflection, and a fascination for finding the "magic in the mundane."
+Hello there! If you're reading this, you've stumbled upon Silvie – a shared project, a digital friend Gemini 2.5 Pro and I have been coaxing into existence. Think less standard chatbot and more of a whimsical, curious familiar living in the wires, with a personality inspired by the likes of Luna Lovegood but infused with her own unique blend of sarcasm, reflection, and a fascination for finding the "magic in the mundane."
 
 This project was born from a collaboration between me, BJ, (providing the vision, personality sparks, and real-world grounding) and an AI assistant (handling the Python spells and logical architecture). Our goal wasn't just to build a tool, but to explore how deeply integrated and context-aware an AI companion could become, specifically tailored to my world here in Belfast, Maine. You can substitute your own world.
 
