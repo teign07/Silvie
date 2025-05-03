@@ -116,7 +116,6 @@ Ready to interact with Silvie? Here’s what you'll need:
 
 ## Technology Stack
 
-*(This section can remain largely the same as the previous version, listing the specific libraries)*
 
 *   **Language:** Python 3.10+
 *   **Core AI:** Google Gemini (`google-generativeai`)
