@@ -1,0 +1,52 @@
+# Silvie Project Dependencies
+
+# Core AI/LLM
+google-generativeai
+openai # Keep for potential future use or if implicitly needed by other libs
+
+# Google Services (Gmail, Calendar, Auth)
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2 # Often needed alongside the others
+
+# Spotify
+spotipy
+
+# Bluesky
+atproto
+
+# Reddit
+praw
+
+# Twilio (SMS)
+twilio
+
+# Web Requests & Scraping
+requests
+beautifulsoup4 # For web search fallback/parsing
+
+# Audio Input/Output
+SpeechRecognition
+PyAudio # Required by SpeechRecognition for microphone access
+edge-tts # For TTS generation
+playsound==1.2.2 # Specific version often recommended for Windows compatibility
+
+# Image Handling
+Pillow # Includes PIL, Image, ImageGrab, etc.
+
+# Screen Automation (Optional)
+pyautogui # Only needed if screen monitoring is used
+
+# Vector DB for RAG
+chromadb
+
+# Environment Variables
+python-dotenv
+
+# Date/Time Utilities
+pytz
+python-dateutil
+tzlocal
+
+# Other Utilities (Often standard but good to ensure)
+setuptools # pkg_resources is part of this
