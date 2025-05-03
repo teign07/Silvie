@@ -51,6 +51,10 @@ Instead of just listing features, here's a feel for what interacting with Silvie
 
 
 
+![Alt text describing the image](URL_you_copied_in_step_3)
+
+
+
 ## The Magic Inside (A Peek Under the Hood)
 
 How does she do all this?
