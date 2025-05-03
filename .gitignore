@@ -1,0 +1,53 @@
+# --- Python ---
+# Virtual environment folders
+venv/
+env/
+.venv/
+.env/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# --- Silvie Specific ---
+# Environment files (CRITICAL - Contains API Keys!)
+*.env
+
+# Authentication Tokens / Caches (CRITICAL - Sensitive session data)
+token.pickle
+.spotify_token_cache.json
+
+# Generated Files
+Silvie_Generations/ # Folder for Stable Diffusion images
+Silvie_Gifts/      # Folder for generated gift files
+temp_screenshot.jpg # Temporary screenshot file
+*.mp3              # Ignore generated TTS audio files (if saved locally outside temp)
+
+# Databases (Can become large, generated from source data)
+silvie_rag_db/
+silvie_diary_rag_db/
+
+# State / Cache Files (Runtime state, can often be regenerated)
+*rag_index_state.json
+*weekly_goal.json
+*pending_gifts.json
+*reddit_comment_cache.json
+
+# --- IDE / Editor specific ---
+.idea/
+.vscode/
+
+# --- OS specific ---
+.DS_Store
+Thumbs.db
+
+silvie_chat_history.json
+silvie_diary.json
