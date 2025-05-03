@@ -28,7 +28,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   Generating a little digital "gift" (a poem, image, story snippet). She makes it, but doesn't tell you about it until she feels the right moment.
     *   Pulling a Tarot card (or 3) and offering a thought.
     *   Interacting (carefully!) with Bluesky or Reddit (posting, liking, following, commenting).
-    *   Checking in on past calendar events or suggesting scheduling something new.
+    *   Checking in on past calendar events or scheduling something new.
     *   Even initiating her own "Personal Curiosity" exploration using her various tools.
 *   **Creatively Curious:** Silvie isn't just about information; she engages with creativity:
     *   **Image Generation:** She can create images via a local Stable Diffusion instance, often using her preferred Ghibli-esque style. Ask her to draw something, or she might generate one spontaneously!
