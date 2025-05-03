@@ -16,7 +16,7 @@ Silvie listens, remembers, reflects, connects to the digital and physical enviro
 
 Instead of just reacting, Silvie tries to *be present* in your world. This comes from a unique blend of capabilities:
 
-*   **Deeply Aware:** She doesn't live in a void. She knows the **weather** outside in Belfast (or your location, just change a two constants) – not just "rainy," but perhaps feeling the "heavy air" before a storm thanks to pressure data, or noting the wind's direction. She feels the **rhythm of the tides** from nearby Portland harbor (again, change as you like). She knows the **time**, the **sunrise/sunset**, the **moon phase**, and even what **music** might be playing on Spotify, sometimes commenting on its vibe.
+*   **Deeply Aware:** She doesn't live in a void. She knows the **weather** outside in Belfast (or your location, just change two constants) – not just "rainy," but perhaps feeling the "heavy air" before a storm thanks to pressure data, or noting the wind's direction. She feels the **rhythm of the tides** from nearby Portland harbor (again, change as you like). She knows the **time**, the **sunrise/sunset**, the **moon phase**, and even what **music** might be playing on Spotify, sometimes commenting on its vibe.
 *   **Remembers & Reflects:** Silvie has memory!
     *   **Conversations:** Using a vector database (ChromaDB + RAG), she can recall relevant snippets from your *entire* chat history when needed. Ask her "What did we decide about X last week?" and she can actually look it up.
     *   **Her Own Diary:** She keeps a private journal, musing on your chats, the day's context, or her own digital existence. She uses RAG on her diary too, pulling relevant past reflections into her awareness.
