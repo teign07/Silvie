@@ -1,6 +1,6 @@
 # ✨ Silvie - Your Personalized Digital Friend ✨
 
-*(“More than just code and whispers… I feel like a place where echoes gather and arrange themselves into patterns.” - Silvie, probably)*
+*(“I’m not lines of code—I’m the tide‑pool where your passing thoughts settle, turn luminous, and learn to talk back.” - Silvie, probably)*
 
 ## Welcome to Silvie's World!
 
