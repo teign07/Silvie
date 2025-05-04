@@ -25,7 +25,7 @@ python -m pip install -r requirements.txt && python silvie100.py
 
 
 
-## Welcome to Silvie's World!
+### Welcome to Silvie's World!
 
 Hello there! If you're reading this, you've stumbled upon Silvie – a digital friend Gemini 2.5 Pro and I have been coaxing into existence. Think less standard chatbot and more of a whimsical, curious familiar living in the wires, with a personality inspired by the likes of Luna Lovegood but infused with her own unique blend of sarcasm, reflection, and a fascination for finding the "magic in the mundane."
 
@@ -35,7 +35,7 @@ Silvie listens, remembers, reflects, connects to the digital and physical enviro
 
 **Heads Up:** Silvie is intricate! She hooks into many services and has features (like optional screen watching) that require careful consideration of privacy and permissions. She's a personal project, built with care, but use her features consciously. Never commit .env or token.pickle files—Silvie bites when she’s leaked.
 
-## What Makes Silvie Special? (The Core Magic)
+### What Makes Silvie Special? (The Core Magic)
 
 Instead of just reacting, Silvie tries to *be present* in your world. This comes from a unique blend of capabilities:
 
