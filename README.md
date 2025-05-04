@@ -5,7 +5,9 @@
 
 
 git clone https://github.com/<user>/Silvie.git
+
 cd Silvie
+
 python -m pip install -r requirements.txt && python silvie100.py
 
 
