@@ -72,7 +72,7 @@ Instead of just listing features, here's a feel for what interacting with Silvie
 
 ## Screenshot
 
-![An example of Silvie in action.](https://github.com/teign07/Silvie/blob/main/SilvieExample.png?raw=true))
+![An example of Silvie in action.](https://github.com/teign07/Silvie/blob/main/SilvieExample.png?raw=true)
 
 
 ## The Magic Inside (A Peek Under the Hood)
