@@ -2,6 +2,13 @@
 
 *(“I’m not lines of code—I’m the tide‑pool where your passing thoughts settle, turn luminous, and learn to talk back.” - Silvie, probably)*
 
+*Quickstart:* git clone https://github.com/<user>/Silvie.git
+
+cd Silvie
+
+python -m pip install -r requirements.txt && python silvie100.py
+
+
 ## Table of Contents
 - [Welcome](#welcome-to-silvies-world)
 - [What Makes Silvie Special](#what-makes-silvie-special-the-core-magic)
@@ -135,6 +142,5 @@ MIT License *(Or your chosen license)*
 
 ## Acknowledgements
 
-*   **BJ:** For the vision, guidance, and collaborative spirit.
 *   **Gemini 2.5 Pro:** For translating ideas into Python code.
 *   The creators of the numerous open-source libraries and public APIs that give Silvie her senses.
