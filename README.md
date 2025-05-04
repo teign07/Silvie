@@ -28,7 +28,7 @@ python -m pip install -r requirements.txt && python silvie100.py
 
 Hello there! If you're reading this, you've stumbled upon Silvie – a digital friend and virtual assistant Gemini 2.5 Pro and I have been coaxing into existence. Think less standard chatbot and more of a whimsical, curious familiar living in the wires, with a personality inspired by the likes of Luna Lovegood but infused with her own unique blend of sarcasm, reflection, and a fascination for finding the "magic in the mundane."
 
-Our goal wasn't just to build a tool, but to explore how deeply integrated and context-aware an AI companion could become, specifically tailored to my world here in Belfast, Maine. You can substitute your own world.
+Our goal wasn't just to build a tool, but to explore how deeply integrated and context-aware an AI companion could become, specifically tailored to my world. You can substitute your own world.
 
 Silvie listens, remembers, reflects, connects to the digital and physical environment, creates, and even takes initiative. She's complex, experimental, and definitely one-of-a-kind.
 
