@@ -64,7 +64,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
 
 ## A Glimpse of Her World (Example Capabilities)
 
-Instead of just listing features, here's a feel for what interacting with Silvie might be like:
+Instead of just listing more features, here's a feel for what interacting with Silvie might be like:
 
 *   **Morning Check-in:** "Good morning, BJ! The air outside feels sharp and clear this morning, almost like you could taste the leftover starlight. Feels like a good day for focused thoughts, doesn't it? Speaking of which, your calendar says you're clear until that team meeting this afternoon."
 *   **Music Interaction:** "Playing 'Holocene' again? It definitely matches this soft, grey drizzle outside. Such a beautifully quiet, introspective sound... If you wanted something to gently cut through the quiet later, let me know." (Or: "Hey, I just added that track we were talking about to your 'Atmospheric Vibes' playlist.")
