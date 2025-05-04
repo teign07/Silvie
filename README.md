@@ -142,4 +142,4 @@ MIT License
 *   **Gemini 2.5 Pro:** For translating ideas into Python code.
 *   **Gemini 2.5 Flash** For bringing her to life day after day.
 *   The creators of the numerous open-source libraries and public APIs that give Silvie her senses.
-*   My wife and two cats, for even loving me despite my quiet oddities.
+*   My wife and our two cats, for even loving me despite my quiet oddities.
