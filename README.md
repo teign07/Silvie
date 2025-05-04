@@ -4,7 +4,7 @@
 
 
 
-git clone https://github.com/<user>/Silvie.git
+git clone https://github.com/Teign07/Silvie.git
 
 cd Silvie
 
@@ -13,10 +13,10 @@ python -m pip install -r requirements.txt && python silvie100.py
 
 
 ## Table of Contents
-- [Welcome](#welcome)
-- [What Makes Silvie Special](#what-makes-silvie-special)
-- [Example Interactions](#example-interactions)
-- [Under the Hood](#under-the-hood)
+- [Welcome](#Welcome-to-Silvie's-World!)
+- [What Makes Silvie Special](#What-Makes-Silvie-Special?-(The-Core-Magic))
+- [Example Interactions](#A-Glimpse-of-Her-World-(Example-Capabilities))
+- [Under the Hood](#The-Magic-Inside-(A-Peek-Under-the-Hood))
 - [Setup Guide](#setup-guide)
 - [Technology Stack](#technology-stack)
 - [Configuration](#configuration)
