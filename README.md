@@ -44,7 +44,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   **Her Own Diary:** She keeps a private journal, musing on your chats, the day's context, or her own digital existence. She uses RAG on her diary too, pulling relevant past reflections into her awareness.
     *   **Pattern Spotting:** She synthesizes **themes** from her recent diary entries and **long-term reflections** from her entire history, giving her (and you) insight into her evolving perspective.
     *   **Growth:** We've even nudged her to occasionally acknowledge how her "understanding" of things might shift over time based on your interactions.
-*   **Proactive & Playful:** She doesn't always wait to be spoken to! Based on *everything* she knows (including a generated "Mood Hint" for the moment), an LLM helps her choose thoughtful or whimsical **proactive actions**:
+*   **Proactive & Playful:** She doesn't always wait to be spoken to! Based on *everything* she knows (including a generated "Mood Hint" for the moment), she chooses thoughtful or whimsical **proactive actions**:
     *   Sharing a unique observation or asking a question.
     *   Suggesting music or performing a web search on a relevant topic.
     *   Generating a little digital "gift" (a poem, image, story snippet). She makes it, but doesn't tell you about it until she feels the right moment.
