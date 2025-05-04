@@ -133,7 +133,7 @@ Silvie is a virtual assistant, but also more; she's an experiment in creating a 
 
 ## License
 
-MIT License *(Or your chosen license)*
+MIT License 
 
 ## Acknowledgements
 
