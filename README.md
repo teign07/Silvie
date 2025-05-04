@@ -85,7 +85,7 @@ How does she do all this?
 
 *   **LLM Core:** Google Gemini is her primary "brain," generating responses, interpreting context, making proactive choices, and exploring ideas.
 *   **Rich Context:** Before replying or acting, she gathers information from numerous sources (APIs, history, diary, real-time data) to inform the LLM.
-*   **RAG Memory:** ChromaDB vector databases store embeddings of our entire chat history and her diary. When context seems relevant, she performs semantic searches to retrieve the most similar past moments or reflections.
+*   **RAG Memory:** ChromaDB vector databases store embeddings of your entire chat history and her diary. When context seems relevant, she performs semantic searches to retrieve the most similar past moments or reflections.
 *   **Structured Diary & Synthesis:** Her diary isn't just random thoughts; it's structured JSON. Periodic LLM-driven analysis extracts recurring themes and long-term patterns, which feed back into her context.
 *   **Mood Hints:** An internal LLM call attempts to synthesize the overall "vibe" from all current context points, providing a subtle guide for her response tone.
 *   **Worker Threads:** Background threads handle fetching data (weather, tides, social media, etc.), running proactive checks, indexing memory, and managing TTS without freezing the main interface.
