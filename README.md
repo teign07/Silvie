@@ -58,6 +58,8 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   **Tarot Reader:** She has access to Tarot interpretations and can perform readings or pull cards for insight. Both one-card pulls with the tarot card image displayed, or three-card readings.
     *   **Conceptual Weaver:** Ask her "How are X and Y connected?" and she'll use her LLM core to explore metaphorical links and hidden pathways between ideas.
     *   Can watch your screen and comment. Let her play games with you! Or Code with you, or make music together, or art.
+    *   Can search the web and report back, either on command or proactively
+    *   Interfaces with Spotify, down to playing music spontaneously based on the vibe of her copious context at the moment.
 *   **Uniquely yours:** She can know about where you live, your life, specific interests, and key people. This deep personalization is core to her design. You decide how much info you're willing to give to google.
 
 ## A Glimpse of Her World (Example Capabilities)
