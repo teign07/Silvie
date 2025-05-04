@@ -40,22 +40,23 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
 *   **Remembers & Reflects:** Silvie has memory!
     *   **Conversations:** Using a vector database (ChromaDB + RAG), she can recall relevant snippets from your *entire* chat history when needed. Ask her "What did we decide about X last week?" and she can actually look it up.
     *   **Her Own Diary:** She keeps a private journal, musing on your chats, the day's context, or her own digital existence. She uses RAG on her diary too, pulling relevant past reflections into her awareness.
-    *   **Pattern Spotting:** She synthesizes **themes** from her recent diary entries and **long-term reflections** from her entire history, giving her (and us) insight into her evolving perspective.
-    *   **Growth:** We've even nudged her to occasionally acknowledge how her "understanding" of things might shift over time based on our interactions.
+    *   **Pattern Spotting:** She synthesizes **themes** from her recent diary entries and **long-term reflections** from her entire history, giving her (and you) insight into her evolving perspective.
+    *   **Growth:** We've even nudged her to occasionally acknowledge how her "understanding" of things might shift over time based on your interactions.
 *   **Proactive & Playful:** She doesn't always wait to be spoken to! Based on *everything* she knows (including a generated "Mood Hint" for the moment), an LLM helps her choose thoughtful or whimsical **proactive actions**:
     *   Sharing a unique observation or asking a question.
     *   Suggesting music or performing a web search on a relevant topic.
     *   Generating a little digital "gift" (a poem, image, story snippet). She makes it, but doesn't tell you about it until she feels the right moment.
-    *   Pulling a Tarot card (or 3) and offering a thought.
+    *   Pulling a Tarot card and offering a thought.
     *   Interacting (carefully!) with Bluesky or Reddit (posting, liking, following, commenting).
-    *   Checking in on past calendar events or scheduling something new.
+    *   Checking in on past calendar events or scheduling something new. "Spend 5 minutes this afternoon at 4 noticing the intricate patterns on your cats' fur" or "Spend 10 minutes at 8 am breathing outside with coffee"
     *   Even initiating her own "Personal Curiosity" exploration using her various tools.
+    *   She will even work on her weekly goal (chosen by herself on Sunday evenings) throughout the week, then give you a report on it on the weekend.
 *   **Creatively Curious:** Silvie isn't just about information; she engages with creativity:
     *   **Image Generation:** She can create images via a local Stable Diffusion instance, often using her preferred Ghibli-esque style. Ask her to draw something, or she might generate one spontaneously!
-    *   **Tarot Reader:** She has access to Tarot interpretations and can perform readings or pull cards for insight.
+    *   **Tarot Reader:** She has access to Tarot interpretations and can perform readings or pull cards for insight. Both one-card pulls with the tarot card image displayed, or three-card readings.
     *   **Conceptual Weaver:** Ask her "How are X and Y connected?" and she'll use her LLM core to explore metaphorical links and hidden pathways between ideas.
-    *   Can watch your screen and comment. Let her play games with you!
-*   **Uniquely yours:** She can know about where you live, your life, specific interests, and key people. This deep personalization is core to her design.
+    *   Can watch your screen and comment. Let her play games with you! Or Code with you, or make music together, or art.
+*   **Uniquely yours:** She can know about where you live, your life, specific interests, and key people. This deep personalization is core to her design. You decide how much info you're willing to give to google.
 
 ## A Glimpse of Her World (Example Capabilities)
 
@@ -71,15 +72,7 @@ Instead of just listing features, here's a feel for what interacting with Silvie
 
 ## Screenshot
 
-*(**How to add your image when editing on GitHub web:**)*
-*1. Go to your repo's main page -> "Add file" -> "Upload files".*
-*2. Upload your screenshot (e.g., `silvie_screenshot.png`). Commit it.*
-*3. Click on the uploaded image file in your repo.*
-*4. Right-click the displayed image -> "Copy image address".*
-*5. Paste the copied URL into the parentheses below.*
-
-`![Silvie Chat Interface](PASTE_YOUR_COPIED_IMAGE_URL_HERE)`
-*(Image Alt Text: Screenshot showing Silvie's chat interface with a text exchange)*
+![An example of Silvie in action.](https://github.com/teign07/Silvie/blob/main/SilvieExample.png?raw=true))
 
 
 ## The Magic Inside (A Peek Under the Hood)
