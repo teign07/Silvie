@@ -13,15 +13,15 @@ python -m pip install -r requirements.txt && python silvie100.py
 
 
 ## Table of Contents
-1. Welcome
-2. What Makes Silvie Special
-3. Example Interactions
-4. Under the Hood
-5. Setup Guide
-6. Technology Stack
-7. Configuration
-8. Philosophy
-9. License
+- [Welcome](#welcome)
+- [What Makes Silvie Special](#what-makes-silvie-special)
+- [Example Interactions](#example-interactions)
+- [Under the Hood](#under-the-hood)
+- [Setup Guide](#setup-guide)
+- [Technology Stack](#technology-stack)
+- [Configuration](#configuration)
+- [Philosophy](#project-philosophy--vision)
+- [License](#license)
 
 
 
