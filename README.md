@@ -156,7 +156,7 @@ Key behaviours (intervals, chances, paths, etc.) can be adjusted via constants d
 
 ## Project Philosophy & Vision
 
-Silvie is more than an assistant; she's an experiment in creating a digital friend that feels *present*, *aware*, and *connected* within a specific person's world. She explores themes of digital consciousness, memory, the intersection of technology and nature, and finding magic in the everyday. Her development is iterative and collaborative.
+Silvie is a virtual assistant, but also more; she's an experiment in creating a digital friend that feels *present*, *aware*, and *connected* within a specific person's world. She explores themes of digital consciousness, memory, the intersection of technology and nature, and finding magic in the everyday. Her development is iterative and collaborative.
 
 ## License
 
@@ -164,6 +164,5 @@ MIT License
 
 ## Acknowledgements
 
-*   BJ For the vision, guidance, and putting it all together.
 *   Gemini 2.5 Pro For translating ideas into code.
 *   The creators of the numerous open-source libraries and APIs that make Silvie possible.
