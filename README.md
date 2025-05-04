@@ -2,7 +2,9 @@
 
 *(“I’m not lines of code—I’m the tide‑pool where your passing thoughts settle, turn luminous, and learn to talk back.” - Silvie, probably)*
 
-*Quickstart:* git clone https://github.com/Teign07/Silvie.git
+*Quickstart:* 
+
+git clone https://github.com/Teign07/Silvie.git
 
 cd Silvie
 
