@@ -46,7 +46,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   **Growth:** We've even nudged her to occasionally acknowledge how her "understanding" of things might shift over time based on your interactions.
 *   **Proactive & Playful:** She doesn't always wait to be spoken to! Based on *everything* she knows (including a generated "Mood Hint" for the moment), she chooses thoughtful or whimsical **proactive actions**:
     *   Sharing a unique observation or asking a question.
-    *   Suggesting music or performing a web search on a relevant topic.
+    *   Suggesting/Playing music or performing a web search on a topic of her choice.
     *   Generating a little digital "gift" (a poem, image, story snippet). She makes it, but doesn't tell you about it until she feels the right moment.
     *   Pulling a Tarot card and offering a thought.
     *   Interacting (carefully!) with Bluesky or Reddit (posting, liking, following, commenting).
