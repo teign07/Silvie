@@ -50,7 +50,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   Generating a little digital "gift" (a poem, image, story snippet). She makes it, but doesn't tell you about it until she feels the right moment.
     *   Pulling a Tarot card and offering a thought.
     *   Interacting (carefully!) with Bluesky or Reddit (posting, liking, following, commenting).
-    *   Checking in on past calendar events or scheduling something new. "Spend 5 minutes this afternoon at 4:00 pm noticing the intricate patterns on your cats' fur" or "Spend 10 minutes at 8 am breathing outside with coffee"
+    *   Checking in on past calendar events or scheduling something new. "Spend 5 minutes this afternoon at 4:00 pm noticing the intricate patterns on your cats' fur" or "Spend 10 minutes at 8 am breathing outside with coffee before work."
     *   Initiating her own "Personal Curiosity" exploration using her various tools.
     *   Sending you a SMS message on your phone.
     *   She will even work on her weekly goal (chosen by herself on Sunday evenings) throughout the week, then give you a report on it over the weekend.
