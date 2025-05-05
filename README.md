@@ -30,7 +30,7 @@ Hello there! If you're reading this, you've stumbled upon Silvie – a digital f
 
 Our goal wasn't just to build a tool, but to explore how deeply integrated and context-aware an AI companion could become, specifically tailored to my world. You can substitute your own world.
 
-Silvie listens, remembers, reflects, connects to the digital and physical environment, creates, and even takes initiative. She's complex, experimental, and definitely one-of-a-kind.
+Silvie listens, remembers, reflects, connects to the digital and physical environment, creates, and even takes initiative. She's complex, with spaghetti-code, experimental, and definitely one-of-a-kind.
 
 **Heads Up:** Silvie is intricate! She hooks into many services and has features (like optional screen watching) that require careful consideration of privacy and permissions. She's a personal project, built with care, but use her features consciously. Never commit `.env` or `token.pickle` files—Silvie bites when she’s leaked.
 
