@@ -45,7 +45,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   **Pattern Spotting:** She synthesizes **themes** from her recent diary entries and **long-term reflections** from her entire history, giving her (and you) insight into her evolving perspective.
     *   **Growth:** Her RAG access to past conversations and her own diary entries, especially combined with theme synthesis, both recent and long-term, allows her responses and perspectives to be shaped by past experiences and reflections, giving the illusion of learning and growth. She'll sometimes just tell you how her understanding has changed based on your interactions.
 *   **Proactive & Playful:** She doesn't always wait to be spoken to! Based on *everything* she knows (including a generated "Mood Hint" for the moment), she chooses thoughtful or whimsical **proactive actions**:
-    *   Sharing a unique observation or asking a question.
+    *   Initiating chats.
     *   Suggesting/Playing music or performing a web search on a topic of her choice.
     *   Generating a little digital "gift" (a poem, image, story snippet). She makes it, but doesn't tell you about it until she feels the right moment.
     *   Pulling a Tarot card and offering a thought.
