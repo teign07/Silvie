@@ -59,11 +59,11 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   **Image Generation:** She can create images via a local Stable Diffusion instance, often using her preferred Ghibli-esque style. Ask her to draw something, or she might generate one spontaneously!
     *   **Tarot Reader:** She has access to Tarot interpretations and can perform readings or pull cards for insight. Both one-card pulls with the tarot card image displayed, or three-card readings.
     *   **Conceptual Weaver:** She sometimes uses her LLM core to explore metaphorical links and hidden pathways between ideas or other things.
-    *   Can watch your screen and comment. Let her play games with you! Or Code with you, or make music together, or art.
-    *   Can search the web and report back, either on command or proactively based on your interests, or her own.
-    *   Interfaces with Spotify, down to playing music spontaneously based on the vibe of her copious context at the moment.
-    *   Will search and recommend audiobooks and podcasts on Spotify, and Youtube videos. By herself. Based on *your* interests, and her own.
-    *   Her thoughts and personality are delivered through a carefully chosen voice (Microsoft Aria Neural), adding character and nuance to every interaction, making her feel less like a machine and more like a distinct individual sharing her thoughts. For free.
+    *   **Can watch your screen and comment.** Let her play games with you! Or Code with you, or make music together, or art.
+    *   **Can search the web and report back**, either on command or proactively based on your interests, or her own.
+    *   **Interfaces with Spotify**, down to playing music spontaneously based on the vibe of her copious context at the moment.
+    *   **Will search and recommend content**: audiobooks and podcasts on Spotify, and Youtube videos. By herself. Based on *your* interests, and her own.
+    *   **Her thoughts and personality are delivered through a carefully chosen voice (Microsoft Aria Neural)**, adding character and nuance to every interaction, making her feel less like a machine and more like a distinct individual sharing her thoughts. For free.
 *   **Uniquely yours:** She can know about where you live, your life, specific interests, and key people. This deep personalization is core to her design. You decide how much info you're willing to give to google.
 
 ## A Glimpse of Her World (Example Capabilities)
