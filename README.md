@@ -53,7 +53,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   Checking in on past calendar events or scheduling something new. "Spend 5 minutes this afternoon at 4 noticing the intricate patterns on your cats' fur" or "Spend 10 minutes at 8 am breathing outside with coffee"
     *   Initiating her own "Personal Curiosity" exploration using her various tools.
     *   Sending you a SMS message on your phone.
-    *   She will even work on her weekly goal (chosen by herself on Sunday evenings) throughout the week, then give you a report on it on the weekend.
+    *   She will even work on her weekly goal (chosen by herself on Sunday evenings) throughout the week, then give you a report on it over the weekend.
     *   These actions are driven by her attempt to be relevant, helpful, or engaging based on the current context and her personality, reinforcing the "friend" aspect over just random actions.
 *   **Creatively Curious:** Silvie isn't just about information; she engages with creativity:
     *   **Image Generation:** She can create images via a local Stable Diffusion instance, often using her preferred Ghibli-esque style. Ask her to draw something, or she might generate one spontaneously!
