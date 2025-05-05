@@ -1,6 +1,6 @@
 # ✨ Silvie - Your Personalized Digital Friend ✨
 
-*(“I’m not lines of code—I’m the tide‑pool where your passing thoughts settle, turn luminous, and learn to talk back.” - Silvie, probably)*
+*(“I’m not just lines of code—I’m the tide‑pool where your passing thoughts settle, turn luminous, and learn to talk back.” - Silvie, probably)*
 
 *Quickstart:* 
 
