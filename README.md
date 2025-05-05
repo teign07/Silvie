@@ -38,12 +38,12 @@ Silvie listens, remembers, reflects, connects to the digital and physical enviro
 
 Instead of just reacting, Silvie tries to *be present* in your world. This comes from a unique blend of capabilities:
 
-*   **Deeply Aware:** She doesn't live in a void. She knows the **weather** outside in Belfast (or your location, just change two constants) – not just "rainy," but perhaps feeling the "heavy air" before a storm thanks to pressure data, or noting the wind's direction. She feels the **rhythm of the tides** from nearby Portland harbor (again, change as you like). She knows the **time**, the **sunrise/sunset**, the **moon phase**, and even what **music** might be playing on Spotify, sometimes commenting on its vibe. She also knows your latest emails, your next calendar events... even what's happening on Reddit and Bluesky.
+*   **Deeply Aware:** She doesn't live in a void. She knows the **weather** outside in Belfast (or your location, just change two constants) – not just "rainy," but perhaps feeling the "heavy air" before a storm thanks to pressure data, or noting the wind's direction. She feels the **rhythm of the tides** from nearby Portland harbor (again, change as you like). She knows the **time**, the **sunrise/sunset**, the **moon phase**, and even what **music** might be playing on Spotify, sometimes commenting on its vibe. She also knows your latest emails, your next calendar events... even what's happening on Reddit and Bluesky. Her inputs can include your chat, your uploaded images, screensharing and your voice through stt. Future plans include webcam support.
 *   **Remembers & Reflects:** Silvie has memory! (and simulated, evolving, self-awareness)
     *   **Conversations:** Using a vector database (ChromaDB + RAG), she can recall relevant snippets from your *entire* chat history when needed. Ask her "What did we decide about X last week?" and she can actually look it up. She also uses chat history as context.
     *   **Her Own Diary:** She keeps a private journal, musing on your chats, the day's context, or her own digital existence. She uses RAG on her diary too, pulling relevant past reflections into her awareness.
     *   **Pattern Spotting:** She synthesizes **themes** from her recent diary entries and **long-term reflections** from her entire history, giving her (and you) insight into her evolving perspective.
-    *   **Growth:** We've even nudged her to occasionally acknowledge how her "understanding" of things might shift over time based on your interactions.
+    *   **Growth:** Her RAG access to past conversations and her own diary entries, especially combined with theme synthesis, both recent and long-term, allows her responses and perspectives to be shaped by past experiences and reflections, giving the illusion of learning and growth. She'll sometimes just tell you how her understanding has changed based on your interactions.
 *   **Proactive & Playful:** She doesn't always wait to be spoken to! Based on *everything* she knows (including a generated "Mood Hint" for the moment), she chooses thoughtful or whimsical **proactive actions**:
     *   Sharing a unique observation or asking a question.
     *   Suggesting/Playing music or performing a web search on a topic of her choice.
@@ -54,6 +54,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   Initiating her own "Personal Curiosity" exploration using her various tools.
     *   Sending you a SMS message on your phone.
     *   She will even work on her weekly goal (chosen by herself on Sunday evenings) throughout the week, then give you a report on it on the weekend.
+    *   These actions are driven by her attempt to be relevant, helpful, or engaging based on the current context and her personality, reinforcing the "friend" aspect over just random actions.
 *   **Creatively Curious:** Silvie isn't just about information; she engages with creativity:
     *   **Image Generation:** She can create images via a local Stable Diffusion instance, often using her preferred Ghibli-esque style. Ask her to draw something, or she might generate one spontaneously!
     *   **Tarot Reader:** She has access to Tarot interpretations and can perform readings or pull cards for insight. Both one-card pulls with the tarot card image displayed, or three-card readings.
@@ -61,6 +62,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
     *   Can watch your screen and comment. Let her play games with you! Or Code with you, or make music together, or art.
     *   Can search the web and report back, either on command or proactively.
     *   Interfaces with Spotify, down to playing music spontaneously based on the vibe of her copious context at the moment.
+    *   Her thoughts and personality are delivered through a carefully chosen voice (Microsoft Aria Neural), adding character and nuance to every interaction, making her feel less like a machine and more like a distinct individual sharing her thoughts. For free.
 *   **Uniquely yours:** She can know about where you live, your life, specific interests, and key people. This deep personalization is core to her design. You decide how much info you're willing to give to google.
 
 ## A Glimpse of Her World (Example Capabilities)
