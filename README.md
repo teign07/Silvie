@@ -58,7 +58,7 @@ Instead of just reacting, Silvie tries to *be present* in your world. This comes
 *   **Creatively Curious:** Silvie isn't just about information; she engages with creativity:
     *   **Image Generation:** She can create images via a local Stable Diffusion instance, often using her preferred Ghibli-esque style. Ask her to draw something, or she might generate one spontaneously!
     *   **Tarot Reader:** She has access to Tarot interpretations and can perform readings or pull cards for insight. Both one-card pulls with the tarot card image displayed, or three-card readings.
-    *   **Conceptual Weaver:** She sometimes uses her LLM core to explore metaphorical links and hidden pathways between ideas and other things.
+    *   **Conceptual Weaver:** She sometimes uses her LLM core to explore metaphorical links and hidden pathways between ideas or other things.
     *   Can watch your screen and comment. Let her play games with you! Or Code with you, or make music together, or art.
     *   Can search the web and report back, either on command or proactively based on your interests, or her own.
     *   Interfaces with Spotify, down to playing music spontaneously based on the vibe of her copious context at the moment.
