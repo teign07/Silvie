@@ -111,7 +111,120 @@ Ready to interact with Silvie (or build your own inspired version)? Here’s wha
 1.  **Clone:** `git clone <repository-url>` and `cd <repository-directory>`.
 2.  **Virtual Environment (Recommended):** `python -m venv venv`, then activate it.
 3.  **Install Packages:** `pip install -r requirements.txt` (Requires `requirements.txt` file).
-4.  **Create `.env` Files:** Create `google.env`, `silviespotify.env`, `bluesky.env`, `reddit.env`, `twilio.env` (optional) in the root. Populate with *your* API keys. **Use a `.gitignore` file to protect these!**
+4.  **Create `.env` Files:** Create `google.env`, `silviespotify.env`, `bluesky.env`, `reddit.env`, `twilio.env` (optional) in the root. Populate with *your* API keys. **Use a `.gitignore` file to protect these!** The files and variables you need are: 1. google.env
+# For Google Gemini API and Custom Search Engine (CSE)
+GOOGLE_API_KEY="YOUR_GOOGLE_AI_STUDIO_API_KEY_HERE"
+GOOGLE_CSE_ID="YOUR_GOOGLE_CUSTOM_SEARCH_ENGINE_ID_HERE"
+Use code with caution.
+Env
+Notes for User:
+GOOGLE_API_KEY: Get this from Google AI Studio (formerly MakerSuite) for Gemini access.
+GOOGLE_CSE_ID: If using Google Custom Search for web searches, get this from the CSE control panel.
+2. silviespotify.env
+# For Spotify API Integration
+SPOTIFY_CLIENT_ID="YOUR_SPOTIFY_APP_CLIENT_ID_HERE"
+SPOTIFY_CLIENT_SECRET="YOUR_SPOTIFY_APP_CLIENT_SECRET_HERE"
+SPOTIFY_REDIRECT_URI="YOUR_SPOTIFY_APP_REDIRECT_URI_HERE" 
+# (e.g., http://localhost:8888/callback - must match your Spotify App dashboard)
+Use code with caution.
+Env
+Notes for User:
+Create an app on the Spotify Developer Dashboard to get these credentials.
+The SPOTIFY_REDIRECT_URI must exactly match one of the Redirect URIs you've configured in your Spotify app settings. http://localhost:8888/callback is a common one for local development.
+3. bluesky.env
+# For Bluesky (AT Protocol) API Integration
+BLUESKY_HANDLE="your.bluesky.handle" 
+# (e.g., silviescatterwing.bsky.social)
+BLUESKY_APP_PASSWORD="YOUR_BLUESKY_APP_PASSWORD_HERE" 
+# (This is an app-specific password, NOT your main Bluesky account password)
+Use code with caution.
+Env
+Notes for User:
+BLUESKY_HANDLE: Your full Bluesky username.
+BLUESKY_APP_PASSWORD: Generate an app password from your Bluesky account settings (Settings -> App Passwords). Do NOT use your main account password here.
+4. reddit.env
+# For Reddit API Integration
+REDDIT_CLIENT_ID="YOUR_REDDIT_APP_CLIENT_ID_HERE" 
+# (found under your app's name on reddit.com/prefs/apps)
+REDDIT_CLIENT_SECRET="YOUR_REDDIT_APP_CLIENT_SECRET_HERE"
+REDDIT_USERNAME="YOUR_REDDIT_USERNAME_HERE"
+REDDIT_PASSWORD="YOUR_REDDIT_ACCOUNT_PASSWORD_HERE"
+REDDIT_USER_AGENT="Python:SilvieApp:v0.1 (by /u/YOUR_REDDIT_USERNAME_OR_CONTACT)" 
+# (Customize user agent slightly - must not be generic)
+Use code with caution.
+Env
+Notes for User:
+Create a "script" type app on Reddit (reddit.com/prefs/apps) to get the Client ID and Secret.
+REDDIT_USER_AGENT: Should be a unique and descriptive string. It's good practice to include your Reddit username or a way to contact you in case of issues. Avoid generic user agents.
+5. twilio.env (Optional - only if SMS features are used)
+# For Twilio SMS API (Optional)
+TWILIO_ACCOUNT_SID="YOUR_TWILIO_ACCOUNT_SID_HERE"
+TWILIO_AUTH_TOKEN="YOUR_TWILIO_AUTH_TOKEN_HERE"
+TWILIO_PHONE_NUMBER="YOUR_TWILIO_PHONE_NUMBER_HERE" 
+# (e.g., +12345678901)
+MY_PHONE_NUMBER="YOUR_PERSONAL_PHONE_NUMBER_FOR_RECEIVING_SMS_HERE" 
+# (e.g., +19876543210 - include country code)
+Use code with caution.
+Env
+Notes for User:
+Get these credentials from your Twilio account dashboard.
+TWILIO_PHONE_NUMBER is the number you purchased/provisioned from Twilio.
+MY_PHONE_NUMBER is where Silvie will send SMS messages.
+6. openai.env (Potentially for DALL-E or other OpenAI services, if you re-add them)
+Your code currently uses Stable Diffusion locally, so this might not be strictly needed unless you plan to re-integrate OpenAI's DALL-E for image generation or use other OpenAI models. If you were to use OpenAI for anything:
+# For OpenAI API (e.g., DALL-E, GPT models if used)
+# OPENAI_API_KEY="YOUR_OPENAI_API_KEY_HERE"
+Use code with caution.
+Env
+Notes for User (if openai.env is used):
+Get this from your OpenAI account platform.openai.com.
+Revised Step 4 for your README.md or installation guide:
+Step 4: Create and Populate .env Files
+Silvie requires API keys and credentials to connect to various services. You'll need to create several .env files in the root directory of the project and fill them with your own information.
+IMPORTANT: Add these .env files to your .gitignore file immediately to prevent accidentally committing your secret keys to a public repository!
+Example .gitignore entry:
+*.env
+token.pickle
+credentials.json 
+# Add other sensitive files or directories like silvie_rag_db/, etc.
+Use code with caution.
+Create the following files with the specified content, replacing placeholder values with your actual credentials:
+google.env:
+GOOGLE_API_KEY="YOUR_GOOGLE_AI_STUDIO_API_KEY_HERE"
+GOOGLE_CSE_ID="YOUR_GOOGLE_CUSTOM_SEARCH_ENGINE_ID_HERE"
+Use code with caution.
+Env
+(Get GOOGLE_API_KEY from Google AI Studio. GOOGLE_CSE_ID is for Google Custom Search if used).
+silviespotify.env:
+SPOTIFY_CLIENT_ID="YOUR_SPOTIFY_APP_CLIENT_ID_HERE"
+SPOTIFY_CLIENT_SECRET="YOUR_SPOTIFY_APP_CLIENT_SECRET_HERE"
+SPOTIFY_REDIRECT_URI="YOUR_SPOTIFY_APP_REDIRECT_URI_HERE"
+Use code with caution.
+Env
+(Create an app on Spotify Developer Dashboard. SPOTIFY_REDIRECT_URI must match your app config, e.g., http://localhost:8888/callback).
+bluesky.env:
+BLUESKY_HANDLE="your.bluesky.handle"
+BLUESKY_APP_PASSWORD="YOUR_BLUESKY_APP_PASSWORD_HERE"
+Use code with caution.
+Env
+(BLUESKY_APP_PASSWORD is generated from Bluesky settings, not your main password).
+reddit.env:
+REDDIT_CLIENT_ID="YOUR_REDDIT_APP_CLIENT_ID_HERE"
+REDDIT_CLIENT_SECRET="YOUR_REDDIT_APP_CLIENT_SECRET_HERE"
+REDDIT_USERNAME="YOUR_REDDIT_USERNAME_HERE"
+REDDIT_PASSWORD="YOUR_REDDIT_ACCOUNT_PASSWORD_HERE"
+REDDIT_USER_AGENT="Python:SilvieApp:v0.1 (by /u/YOUR_REDDIT_USERNAME)"
+Use code with caution.
+Env
+(Create a "script" app on reddit.com/prefs/apps. Customize REDDIT_USER_AGENT.)
+twilio.env (Optional - for SMS features):
+TWILIO_ACCOUNT_SID="YOUR_TWILIO_ACCOUNT_SID_HERE"
+TWILIO_AUTH_TOKEN="YOUR_TWILIO_AUTH_TOKEN_HERE"
+TWILIO_PHONE_NUMBER="YOUR_TWILIO_PHONE_NUMBER_HERE"
+MY_PHONE_NUMBER="YOUR_PERSONAL_PHONE_NUMBER_FOR_RECEIVING_SMS_HERE"
+Use code with caution.
+Env
+(If you plan to use OpenAI services like DALL-E, you would also create an openai.env with OPENAI_API_KEY="YOUR_KEY").
 5.  **Google `credentials.json`:** Download your OAuth Desktop App credentials file, place it in the root. Run the script once to authorize via browser (creates `token.pickle`).
 6.  **RAG Indexing (CRITICAL):** Silvie needs her memory! Run separate indexing scripts (***included as index_history.py for chat history, and index_diary.py for her diary***) to read `silvie_chat_history.json` / `silvie_diary.json`, generate embeddings, and populate ChromaDB in `./silvie_rag_db` / `./silvie_diary_rag_db`. **Memory features fail without this.**
 7.  **Optional Files:** Place `silvie_start_sound.wav` in root for audio cue.
