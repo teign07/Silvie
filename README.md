@@ -246,7 +246,7 @@ This API should be accessible at http://localhost:3000/cards as per Silvie's con
 The API also needs to serve card images. Silvie expects these images to be found based on a path configured by TAROT_IMAGE_BASE_PATH (default in Silvie's code is os.path.join(os.path.expanduser('~'), 'Desktop', 'tarotcardapi', 'images')). Ensure your Tarot API's images are located where Silvie can find them, or update this path in Silvie's script.
 To be fully functional with image generation and Tarot readings, ensure both AUTOMATIC1111 (with --api enabled) and your Tarot Card API are running before or while you run Silvie. Silvie will attempt to connect to them when these features are used.
 9.  **Optional Files:** Place `silvie_start_sound.wav` in root for audio cue.
-10.  **Run:** `python silvie_script_name.py` (Use your actual script name).
+10.  **Run:** `python silvie100.py` (Use your actual script name).
 
 ## Technology Stack
 
