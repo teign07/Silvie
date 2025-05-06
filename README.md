@@ -227,10 +227,26 @@ Use code with caution.
 Env
 (If you plan to use OpenAI services like DALL-E, you would also create an openai.env with OPENAI_API_KEY="YOUR_KEY").
 
-6.  **Google `credentials.json`:** Download your OAuth Desktop App credentials file, place it in the root. Run the script once to authorize via browser (creates `token.pickle`).
+6.  **Google `credentials.json`:** Download your OAuth Desktop App credentials file (named credentials.json), place it in the root. Run the script once to authorize via browser (creates `token.pickle`).
 7.  **RAG Indexing (CRITICAL):** Silvie needs her memory! Run separate indexing scripts (***included as index_history.py for chat history, and index_diary.py for her diary***) to read `silvie_chat_history.json` / `silvie_diary.json`, generate embeddings, and populate ChromaDB in `./silvie_rag_db` / `./silvie_diary_rag_db`. **Memory features fail without this.**
-8.  **Optional Files:** Place `silvie_start_sound.wav` in root for audio cue.
-9.  **Run:** `python silvie_script_name.py` (Use your actual script name).
+8.  Configure and Run Local APIs (Stable Diffusion & Tarot)
+Silvie can connect to local APIs for enhanced functionality like image generation and Tarot card readings. These APIs need to be running separately on your machine for Silvie to use them.
+Stable Diffusion (Image Generation via AUTOMATIC1111 Web UI):
+Silvie is configured to connect to a local Stable Diffusion API, typically provided by the AUTOMATIC1111 Web UI (or compatible forks).
+Requirement: You need to have AUTOMATIC1111 Stable Diffusion Web UI (or a similar API-compatible version) installed and running on your computer.
+Crucial Setting: When you launch the Web UI (e.g., by running webui-user.bat or webui.sh), you must enable the API. This is usually done by adding the command-line argument --api to your launch script.
+Example webui-user.bat (Windows): set COMMANDLINE_ARGS=--api
+Example webui.sh (Linux/macOS): export COMMANDLINE_ARGS="--api"
+Silvie expects the API to be running at http://127.0.0.1:7860 (this is the default for AUTOMATIC1111). If your Web UI runs on a different port, you'll need to adjust STABLE_DIFFUSION_API_URL in Silvie's script (currently hardcoded).
+Note on GPUs: While Silvie can send requests, image generation speed and success heavily depend on your local Stable Diffusion setup and hardware (GPU). Integrated AMD graphics might be slow or have limitations with some models/features.
+Tarot Card API (Tarot Readings & Images):
+Silvie uses a local Tarot card API for pulling cards and displaying their images.
+Requirement: You need to have the tarotcardapi (or the specific local Tarot API you are using) installed and running on your computer.
+This API should be accessible at http://localhost:3000/cards as per Silvie's configuration (TAROT_API_BASE_URL).
+The API also needs to serve card images. Silvie expects these images to be found based on a path configured by TAROT_IMAGE_BASE_PATH (default in Silvie's code is os.path.join(os.path.expanduser('~'), 'Desktop', 'tarotcardapi', 'images')). Ensure your Tarot API's images are located where Silvie can find them, or update this path in Silvie's script.
+To be fully functional with image generation and Tarot readings, ensure both AUTOMATIC1111 (with --api enabled) and your Tarot Card API are running before or while you run Silvie. Silvie will attempt to connect to them when these features are used.
+9.  **Optional Files:** Place `silvie_start_sound.wav` in root for audio cue.
+10.  **Run:** `python silvie_script_name.py` (Use your actual script name).
 
 ## Technology Stack
 
