@@ -113,7 +113,7 @@ Ready to interact with Silvie (or build your own inspired version)? Here’s wha
 3.  **Install Packages:** `pip install -r requirements.txt` (Requires `requirements.txt` file).
 4.  **Create `.env` Files:** Create `google.env`, `silviespotify.env`, `bluesky.env`, `reddit.env`, `twilio.env` (optional) in the root. Populate with *your* API keys. **Use a `.gitignore` file to protect these!**
 5.  **Google `credentials.json`:** Download your OAuth Desktop App credentials file, place it in the root. Run the script once to authorize via browser (creates `token.pickle`).
-6.  **RAG Indexing (CRITICAL):** Silvie needs her memory! Run separate indexing scripts (***not included***) to read `silvie_chat_history.json` / `silvie_diary.json`, generate embeddings, and populate ChromaDB in `./silvie_rag_db` / `./silvie_diary_rag_db`. **Memory features fail without this.** (Tip: Ask an LLM like Gemini/ChatGPT/Claude to help create simple indexing scripts).
+6.  **RAG Indexing (CRITICAL):** Silvie needs her memory! Run separate indexing scripts (***included as index_history.py for chat history, and index_diary.py for her diary***) to read `silvie_chat_history.json` / `silvie_diary.json`, generate embeddings, and populate ChromaDB in `./silvie_rag_db` / `./silvie_diary_rag_db`. **Memory features fail without this.**
 7.  **Optional Files:** Place `silvie_start_sound.wav` in root for audio cue.
 8.  **Run:** `python silvie_script_name.py` (Use your actual script name).
 
