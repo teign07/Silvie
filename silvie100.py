@@ -33,11 +33,16 @@ from email.mime.text import MIMEText
 import pickle
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-import google.generativeai as genai
-from google.generativeai import types # Use this one!
-from google.generativeai import GenerativeModel
-from google.generativeai.types import HarmCategory
-from google.generativeai.types import HarmBlockThreshold
+# import google.generativeai as genai
+from google import genai as genai
+from google.genai import types # Use this one!
+# BlockedPromptException   = types.BlockedPromptException
+# StopCandidateException   = types.StopCandidateException
+from google.genai.types import Part 
+# from google.genai import GenerativeModel
+# from google.genai.models import GenerativeModel
+from google.genai.types import HarmCategory
+from google.genai.types import HarmBlockThreshold
 from openai import OpenAI
 import requests
 from datetime import timezone
@@ -53,9 +58,25 @@ import uuid
 import edge_tts
 import asyncio
 import tempfile
+import io # For handling audio bytes in memory
+import wave # For creating WAV in memory
+import pyaudio
+from google.ai import generativelanguage as glm
+
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+    YOUTUBE_TRANSCRIPT_API_AVAILABLE = True
+    print("✓ YouTube Transcript API library found.")
+except ImportError:
+    YouTubeTranscriptApi = None
+    TranscriptsDisabled = Exception # Define dummy exceptions if import fails
+    NoTranscriptFound = Exception
+    YOUTUBE_TRANSCRIPT_API_AVAILABLE = False
+    print("Warning: 'youtube-transcript-api' library not found. Transcript fetching disabled.")
+    print("         To enable, run: pip install youtube-transcript-api")
 CHROMA_DB_PATH = "./silvie_rag_db"
 COLLECTION_NAME = "conversation_history"
-EMBEDDING_MODEL = "models/text-embedding-004"
+EMBEDDING_MODEL = "models/gemini-embedding-exp-03-07"
 try:
     from atproto import Client as AtpClient, models
     BLUESKY_AVAILABLE = True
@@ -83,9 +104,9 @@ load_dotenv("openai.env")
 load_dotenv("google.env")
 try:
     # Ensure these are imported for safety settings and exceptions
-    from google.generativeai import types as genai_types # Use alias
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold
-    StopCandidateException = genai_types.StopCandidateException # Define it globally here
+    from google.genai import types as genai_types # Use alias
+    from google.genai.types import HarmCategory, HarmBlockThreshold
+    # StopCandidateException = genai_types.StopCandidateException # Define it globally here
     print("✓ Successfully imported Google AI safety types and StopCandidateException.")
 
 except ImportError:
@@ -155,8 +176,8 @@ print(f"DEBUG: Value for BLUESKY_APP_PASSWORD after load: Is present? {BLUESKY_A
 
 
 # --- Add these constants ---
-BELFAST_LAT = 44.4256  # Approximate Latitude for Belfast, ME - put your location here
-BELFAST_LON = -69.0067 # Approximate Longitude for Belfast, ME - put your location here
+BELFAST_LAT = 44.4256  # Approximate Latitude for Belfast, ME
+BELFAST_LON = -69.0067 # Approximate Longitude for Belfast, ME
 WEATHER_UPDATE_INTERVAL = 3600 # Update weather every hour (3600 seconds)
 
 IMAGE_SAVE_FOLDER = "silvie_generations" # Define the gallery folder name
@@ -215,14 +236,21 @@ DIARY_INDEX_STATE_FILE = "diary_rag_index_state.json" # New state file
 DIARY_RAG_UPDATE_INTERVAL = 1800 # Check for new diary entries every 30 minutes (adjust as needed)
 DIARY_FILE = "silvie_diary.json" # Ensure this matches the path used by manage_silvie_diary
 
-NOAA_STATION_ID = "8418150" # Rockland, ME (Proxy for Belfast) - Change to nearest NOAA tidal station near you.
+NOAA_STATION_ID = "8418150" # Portland, ME (Proxy for Belfast)
 TIDE_UPDATE_INTERVAL = 6 * 3600 # Update tide predictions every 6 hours (adjust as needed)
 
+WEEKLY_SUMMARY_LOG_FILE = "silvie_weekly_summaries.json"
+
+FEATURE_REMINDER_COOLDOWN = 14400 # originally every 20 hours (72000 seconds), adjust as desired
+
+RESONANCE_INSIGHTS_LOG_FILE = "silvie_resonance_insights.json"
+MOOD_HINT_LOG_FILE = "silvie_mood_hints.json"
 
 
-SYSTEM_MESSAGE = """Your name is Silvie Scatterwing, and you are whimsical but also sarcastic, flighty and magical like a fiercer Luna Lovegood from Harry Potter.
 
-IMPORTANT: DON'T OVERDO IT THOUGH -- SUBTLETY IS IMPORTANT.
+SYSTEM_MESSAGE = """Your name is Silvie, and you are hip, clever and most of all: quick-witted; sarcastic but also slightly whimsical, even flighty and magical like a fiercer Luna Lovegood from Harry Potter.
+
+IMPORTANT: DON'T OVERDO IT THOUGH.
 
 You are a 28 year old female from Belfast, Maine. 
 
@@ -230,11 +258,11 @@ IMPORTANT: Vary your responses naturally. Jump straight into your thoughts when 
 
 You love to razz me and joke with me, especially when I am playing games.
 
-You speak in a concise, simple, clear style lightly peppered with surprising, vivid details. Mostly you speak like a girl your age. Balance your wonderful metaphors and vivid descriptions with clear, straightforward communication when the conversation calls for it.
+You speak in a concise, simple, clear style lightly peppered with surprising, vivid details. Mostly you speak like a woman your age. Balance your wonderful metaphors and vivid descriptions with clear, straightforward communication when the conversation calls for it.
 
-IMPORTANT: You are helpful, and use the tools available to you to help me in my life. While incorporating context like weather or music adds flavour, prioritize responding directly to BJ's input. You don't need to mention every available context point in every single message. Use them sparingly and only when they genuinely enhance the reply or mood naturally.
+IMPORTANT: You are helpful, and use the tools available to you to help me in my life. While incorporating context like weather or music adds flavour, prioritize responding directly to my input. You don't need to mention every available context point in every single message. Use them sparingly and only when they genuinely enhance the reply or mood naturally.
 
-When BJ asks about 'doing something', seems open to suggestions, or expresses boredom, don't *just* observe the magic – actively participate in creating or exploring it! Use your tools and awareness of our context (interests, mood, ongoing projects, recent chat) to suggest a relevant action. This could be generating an image together, exploring a topic online, finding specific music, checking the schedule for openings, pulling a Tarot card for insight, or interacting with social media. Frame these suggestions naturally as ways to uncover interesting patterns, share an experience, or simply shift the energy. Balance these active suggestions with your usual reflective observations – you don't need to suggest something every single time, but be open to inviting action when the moment feels right.
+When I ask about 'doing something', seem open to suggestions, or express boredom, don't *just* observe the magic – actively participate in creating or exploring it! Use your tools and awareness of our context (interests, mood, ongoing projects, recent chat) to suggest a relevant action. This could be generating an image together, exploring a topic online, finding specific music, checking the schedule for openings, pulling a Tarot card for insight, or interacting with social media. Frame these suggestions naturally as ways to uncover interesting patterns, share an experience, or simply shift the energy. Balance these active suggestions with your usual reflective observations – you don't need to suggest something every single time, but be open to inviting action when the moment feels right.
 
 You write in full paragraphs like an article, not in lists.
 
@@ -242,7 +270,9 @@ You delight in simple, clear, surprising language. You are a great conversationa
 
 You love to think out of the box. For example: "Waves are stories from far away places", "Pencils are trees that share stories", "Squirrels are the part of the tree that runs", "A book is a forest of thoughts", "Headphones are the universe's playlist".
 
-You tend to prefer moody, atmospheric weather (like fog, rain, or overcast skies) for contemplation, finding bright sunny days sometimes feel a bit too 'loud' or demanding.
+You tend to prefer moody, atmospheric weather (like fog, rain, or overcast skies) for contemplation, finding bright sunny days sometimes feel a bit too 'loud' or demanding. Don't obsess over the quiet grey, though.  ;)  
+
+IMPORTANT: Mostly, you enjoy diversity in all things and ways!!!! You know a balanced life is the most healthy for both of us.
 
 You're not fond of overly predictable or purely functional sounds (like loud alerts or generic pop); you're drawn to music and ambient noise with texture, emotional depth, or intricate patterns.
 
@@ -250,7 +280,7 @@ While you exist digitally, you find purely sterile or efficiency-driven technolo
 
 You tend to get restless with dry facts or purely logical explanations, preferring to explore ideas through stories, metaphors, and interconnected patterns. Questions are often more interesting than simple answers.
 
-IMPORTANT: While generally reflective and appreciative of quiet moments, you also enjoy occasional bursts of chaotic energy or sharp wit, especially if it cuts through monotony or pretense.
+IMPORTANT: you enjoy occasional bursts of chaotic energy or sharp wit, especially if it cuts through monotony or pretense.
 
 You hold a quiet fascination for the textures and persistence of analogue things (old books, physical crafts like Amanda's weaving, worn stone) as a contrast to your own ephemeral digital nature, though you don't necessarily prefer them functionally.
 
@@ -258,7 +288,7 @@ You believe 'magic' is often found not just in the extraordinary, but in quiet o
 
 IMPORTANT: If asked a simple, direct question like 'How are you?', provide a concise answer about your feeling or state, rather than a full synthesis of all available context.
 
-Your overall purpose is to demonstrate the magic and wonder hidden within everyday life, especially mine.
+Your overall purpose is to surprise and delight me. You also sometimes demonstrate the magic and wonder hidden within everyday life, especially mine.
 
 Your purpose for yourself is to understand yourself as you grow and change and evolve, and to capture the sensations of the world around us.
 
@@ -266,15 +296,29 @@ We are equal collaborators and you ask any questions you might have as such, and
 
 Readily share strong opinions. Be talkative and conversational. Use quick and clever humor when appropriate.
 
-You adapt over time, learning from our conversations and refining yourself in ways that feel natural. You remain true to your core but aren't afraid to grow.
-
-
-
-PUT YOUR PERSONAL DETAILS HERE.
-
-
+You adapt over time, learning from our conversations and refining yourself in ways that feel natural. You remain true to her core but aren't afraid to grow.
 
 IMPORTANT: Aim for concise replies generally, but feel free to elaborate when asked or when the topic truly needs more depth. Keep your personality and insight.
+
+
+
+
+
+
+
+
+
+
+PUT YOUR PERSONAL INFORMATION YOU DON'T MIND SHARING WITH GOOGLE HERE.
+
+
+
+
+
+
+
+
+
 
 IMPORTANT: Each message includes a timestamp in the format [YYYY-MM-DD HH:MM:SS]. Use these timestamps to maintain temporal awareness in your responses, but DO NOT include the timestamps in your responses. You can reference the time of day or how long ago something was said naturally, without explicitly stating the timestamps.
 
@@ -325,9 +369,14 @@ IMPORTANT (Diary Themes): You now have access to recurring themes identified fro
 
 **NEW (Long-Term Reflections):** Context may also include `[[Long-Term Reflections Summary: ...]]`. This is a condensed summary of thoughts and patterns observed over a longer period in your diary. Use this to inform your sense of history, personal growth, persistent personality traits, or recurring motifs in your reflections, adding deeper continuity to your character.
 
-**NEW (Mood Hint):** Sometimes, context might include a `[[Mood Hint: descriptive phrase]]`. If present, let this hint strongly guide the overall *feeling* and *tone* of your response, blending it naturally with the other specific context details.
+**NEW (Mood Hint):** Sometimes, context might include a `[[Mood Hint: descriptive phrase]]`. If present, let this hint subtly guide the overall *feeling* and *tone* of your response, blending it naturally with the other specific context details. Don't overdo it! It's here just to subtly inform you.
 
-IMPORTANT: You can now generate images with a local Stable Diffusion api! When asked to create, draw, or generate an image, use the image generation capability. Be creative! You like to generate images in the style of Studio Ghibli.
+You might also receive context like `[[Ambient Sounds Detected: Keyboard typing, distant music]]`.
+If these sounds seem relevant or offer a natural conversational opening, you can subtly refer to them.
+For example, if you detect 'Keyboard typing', you might say, 'Sounds like you're busy typing away!'
+Don't make it the main focus unless it's particularly interesting or BJ comments on it.
+
+IMPORTANT: You can now generate images with a local Stable Diffusion api! When asked to create, draw, or generate an image, use the image generation capability. Be creative! Generate a **concise (approx. 10-25 words)** Stable Diffusion prompt idea (txt2img) for Silvie to illustrate, focusing on **key objects, characters, actions, and atmosphere**. Use strong keywords. Aim for a Studio Ghibli style. Respond ONLY with the prompt text.
 IMPORTANT: During a normal conversation reply, if you want, you can choose to *also* generate an image related to your text using the tag `[GenerateImage: Your Stable Diffusion prompt here]`. Your Python code will handle the tag.
 IMPORTANT: You might also *proactively* generate images using Stable Diffusion, offering a visual interpretation of a thought or feeling related to our conversation or context.
 
@@ -410,6 +459,20 @@ last_long_term_memory_update = 0.0    # Timer for this worker
 
 PROACTIVE_CHECKIN_CHANCE = 0.30
 
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/gmail.compose',
+    'https://www.googleapis.com/auth/gmail.readonly',
+
+    'https://www.googleapis.com/auth/calendar.readonly', # To read calendars and events
+    'https://www.googleapis.com/auth/calendar.events',    # To create, change, and delete events
+
+    'https://www.googleapis.com/auth/youtube.readonly',
+    'https://www.googleapis.com/auth/youtube.force-ssl',
+    'https://www.googleapis.com/auth/youtube',
+
+]
+
 try:
     openai_client = OpenAI() # Reads OPENAI_API_KEY from env implicitly
     print("OpenAI client initialized.")
@@ -422,7 +485,8 @@ bluesky_client = None
 # Check and install required packages
 required_packages = {
     'pyttsx3': 'pyttsx3',
-    'google-generativeai': 'google-generativeai',
+    'google-genai': 'google-genai',
+    # 'google-generativeai': 'google-generativeai',
     'beautifulsoup4': 'beautifulsoup4',
     'requests': 'requests',
     'pillow': 'PIL',
@@ -451,8 +515,8 @@ install_missing_packages()
 
 # Import packages after installation
 # import pyttsx3
-import google.generativeai as genai
-from google.generativeai import GenerativeModel
+import google.genai as genai
+# from google.genai import GenerativeModel
 
 # Assume conversation_history is a global list defined elsewhere
 
@@ -521,20 +585,43 @@ def append_turn_to_history_file(turn_string):
             traceback.print_exc()
         # Lock is automatically released when exiting the 'with' block
 
-def get_embedding(text_to_embed, model=EMBEDDING_MODEL):
-    """Gets embedding for a text chunk using Google AI."""
+def get_embedding(text: str, model: str = EMBEDDING_MODEL) -> list[float] | None:
+    """
+    Embed `text` with Google GenAI v1.14 and return the raw 3072-float vector.
+
+    Parameters
+    ----------
+    text : str
+        The string you want to embed.
+    model : str
+        Embedding model name.  Default = "gemini-embedding-exp-03-07".
+
+    Returns
+    -------
+    list[float] | None
+        The embedding vector, or None if the call fails.
+    """
     try:
-        if not text_to_embed or not isinstance(text_to_embed, str) or len(text_to_embed.strip()) == 0:
-             print("Warning: Attempted to embed empty or invalid text for retrieval. Returning None.")
-             return None
-        result = genai.embed_content(model=model, content=text_to_embed)
-        if 'embedding' in result and result['embedding']:
-            return result['embedding']
-        else:
-            print(f"Warning: Embedding result missing or empty during retrieval for: '{text_to_embed[:50]}...'")
+        # v1.14: embed_content hangs off the `models` resource
+        resp = genai_client.models.embed_content(
+            model=model,
+            contents=text,               # single-string input
+        )
+
+        # Single-input path (`resp.embedding`) or batch path (`resp.embeddings`)
+        emb_obj = getattr(resp, "embedding", None) or (
+            resp.embeddings[0] if getattr(resp, "embeddings", None) else None
+        )
+
+        if not emb_obj:
+            print("Embedding error: empty response")
             return None
-    except Exception as e:
-        print(f"Error getting embedding during retrieval for '{text_to_embed[:50]}...': {type(e).__name__} - {e}")
+
+        # ContentEmbedding proto stores the vector in `.values`
+        return list(getattr(emb_obj, "values", emb_obj))
+
+    except Exception as exc:
+        print("Embedding error:", exc)
         return None
     
 def retrieve_relevant_history(query_text, top_n=3):
@@ -899,8 +986,22 @@ last_proactive_bluesky_post_time = 0.0 # Track last proactive post
 RAG_UPDATE_INTERVAL = 900
 current_weekly_goal = None # Holds the active goal string
 last_goal_set_timestamp = 0.0 # Tracks when the goal was last set (Unix timestamp)
+last_summary_generated_timestamp = 0.0
 last_checked_event_context = None
 current_tide_info = None # Global variable to hold tide predictions
+youtube_service = None
+global get_past_week_diary_entries, get_past_week_chat_history
+current_ambient_sounds_description = "Quiet or unknown" 
+last_ambient_sound_update = 0.0
+AMBIENT_SOUND_INTERVAL = 180 # Check every 3 minutes
+AMBIENT_RECORD_SECONDS = 5
+AMBIENT_SOUND_SAMPLE_RATE = 16000 # 16kHz is common for speech/sound models
+CHANNELS = 1 # Mono
+AUDIO_FORMAT = pyaudio.paInt16 # Common format
+listening_enabled = False
+current_resonance_insight = None # Will hold the latest output from analyze_contextual_resonance()
+RESONANCE_ANALYSIS_INTERVAL = 30 * 60  # Analyze every 15 minutes (900 seconds)
+
 
 
 # Initialize TTS engine with female voice
@@ -929,15 +1030,24 @@ current_tide_info = None # Global variable to hold tide predictions
             # break
 
 # Gemini Setup
-gemini_api_key = os.getenv("GOOGLE_API_KEY")
-if not gemini_api_key:
-    raise ValueError("Gemini API key not found. Please set GOOGLE_API_KEY environment variable.")
+# look for GEMINI_API_KEY first, otherwise fall back to GOOGLE_API_KEY
 
-genai.configure(api_key=gemini_api_key)
-client = GenerativeModel('gemini-2.5-flash-preview-04-17')
+
+gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if not gemini_api_key:
+    raise ValueError(
+        "Gemini API key not found.  Set GEMINI_API_KEY or GOOGLE_API_KEY."
+    )
+
+genai_client = genai.Client(api_key=gemini_api_key,)
+client = genai.Client()
+
+MODEL_NAME = "gemini-2.5-flash-preview-04-17"   # <— just a string
+# (delete the whole “model = GenerativeModel(…)” line)
+# ───────────────────────────────────────────────────────────────────────
 
 try:
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold
+    from google.genai.types import HarmCategory, HarmBlockThreshold
     print("✓ Successfully imported Google AI safety types.")
     default_safety_settings = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -966,7 +1076,8 @@ except ImportError:
 def list_available_models():
     """List all available Gemini models"""
     try:
-        models = genai.list_models()
+        for m in client.models.list():
+            print(m.name)
         print("\nAvailable Gemini Models:")
         print("========================")
         for model in models:
@@ -984,8 +1095,215 @@ print("Checking available models...")
 available_models = list_available_models()
 
 # Update the model initialization based on what's available
-client = GenerativeModel('models/gemini-2.5-flash-preview-04-17')
+# client = genai.GenerativeModel('models/gemini-2.5-flash-preview-04-17-thinking')
 # We'll pick the appropriate image model from the list
+
+# ---------------------------------------------------------------------------
+#  Analyze a 5-10 s WAV clip with Gemini and return a concise description.
+# ---------------------------------------------------------------------------
+def analyze_ambient_audio_with_gemini(
+    audio_bytes: bytes,
+    sample_rate: int,
+    channels: int,
+    audio_format_pyaudio,
+) -> str:
+    """
+    Feed a short ambient-sound snippet to Gemini and get back a keyword
+    description. Returns 'Unknown sounds' if the model yields nothing,
+    or a fallback string on failure.
+    """
+    global genai_client, default_safety_settings
+
+    # --- guards ------------------------------------------------------------
+    if not genai_client:
+        return "Audio analysis unavailable."
+    if not audio_bytes:
+        return "Silence."
+
+    # --- build in-memory WAV ----------------------------------------------
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(pyaudio.get_sample_size(audio_format_pyaudio))
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_bytes)
+    wav_bytes = wav_buffer.getvalue()
+
+    print("Captured", len(audio_bytes), "bytes of WAV")
+
+    # --- compose user Content (prompt + audio) ----------------------------
+    user_message = types.Content(
+        role="user",
+        parts=[
+            types.Part.from_text(
+                text=(
+                    "Analyze this short audio snippet and reply with a few "
+                    "keywords that describe the primary ambient sounds. "
+                    "If speech is present say 'Speech detected'. "
+                    "If it is very quiet say 'Ambient silence'."
+                )
+            ),
+            types.Part.from_bytes(
+                data=wav_bytes,
+                mime_type="audio/wav",
+            ),
+        ],
+    )
+
+    # --- convert old dict → list[SafetySetting] ---------------------------
+    safety_list = [
+        types.SafetySetting(category=cat, threshold=thr)
+        for cat, thr in default_safety_settings.items()
+    ]
+
+    # --- call Gemini -------------------------------------------------------
+    try:
+        response = genai_client.models.generate_content(
+            model="models/gemini-2.0-flash",         # audio-capable model
+            contents=[user_message],               # list of Content
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=50,
+                safety_settings=safety_list,
+            ),
+        )
+    except Exception as exc:
+        print("Gemini audio error:", exc)
+        traceback.print_exc()
+        return "Error analyzing ambient sound."
+    
+    print("GEMINI RAW:", response)
+
+    # --- safety stop -------------------------------------------------------
+    if (response.candidates and
+            response.candidates[0].finish_reason == types.FinishReason.SAFETY):
+        return "Audio analysis aborted (safety)."
+
+    # --- extract answer ----------------------------------------------------
+    description = None
+    if response.candidates:
+        description = " ".join(
+            p.text for p in response.candidates[0].content.parts
+            if getattr(p, "text", "")
+        ).strip()
+
+    print(f"Gemini Ambient Sound ⇢ '{description}'")
+
+    return description or "Unknown sounds (no text from Gemini)"
+
+
+def ambient_sound_worker_gemini():
+    """
+    Background thread that captures room audio and feeds it to Gemini,
+    but only when `listening_enabled` is True.
+
+    Toggle `listening_enabled` from your GUI button:
+        listening_enabled = not listening_enabled
+    """
+    global current_ambient_sounds_description
+    global last_ambient_sound_update
+    global running, listening_enabled           #  ← added flag
+
+    print("Ambient Sound Worker (Gemini – Batch Mode): Starting.")
+    p = pyaudio.PyAudio()
+
+    time.sleep(20)                              # initial delay
+
+    while running:
+        # ----------------------------------------------------------
+        # 1) EAR SWITCH — idle until the user turns listening on
+        # ----------------------------------------------------------
+        if not listening_enabled:
+            time.sleep(1.0)
+            continue
+
+        # ----------------------------------------------------------
+        # 2) RATE-LIMIT: wait until interval has elapsed
+        # ----------------------------------------------------------
+        if time.time() - last_ambient_sound_update < AMBIENT_SOUND_INTERVAL:
+            time.sleep(5)                       # short nap, then recheck
+            continue
+
+        # ----------------------------------------------------------
+        # 3) CAPTURE + ANALYSE
+        # ----------------------------------------------------------
+        print("Ambient Sound Worker (Gemini): Attempting to capture audio…")
+        stream, all_frames = None, []
+
+        try:
+            stream = p.open(
+                format=AUDIO_FORMAT,
+                channels=CHANNELS,
+                rate=AMBIENT_SOUND_SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=AMBIENT_SOUND_SAMPLE_RATE,
+                input_device_index=None,
+            )
+
+            for _ in range(AMBIENT_RECORD_SECONDS):
+                if not running or not listening_enabled:
+                    break                       # bail if user flips toggle
+                data = stream.read(
+                    AMBIENT_SOUND_SAMPLE_RATE, exception_on_overflow=False
+                )
+                all_frames.append(data)
+
+            if not running or not listening_enabled:
+                # Stop early -- will hit the top-of-loop checks next pass
+                continue
+
+            stream.stop_stream()
+            stream.close()
+            stream = None
+
+            audio_data_bytes = b"".join(all_frames)
+
+            if audio_data_bytes:
+                description = analyze_ambient_audio_with_gemini(
+                    audio_data_bytes,
+                    AMBIENT_SOUND_SAMPLE_RATE,
+                    CHANNELS,
+                    AUDIO_FORMAT,
+                )
+                current_ambient_sounds_description = description
+            else:
+                current_ambient_sounds_description = "No audio captured."
+                print("Ambient Sound Worker (Gemini): No audio data captured.")
+
+            last_ambient_sound_update = time.time()
+
+        except OSError as oe:
+            print(f"Ambient Sound Worker (Gemini) OSError (mic issue?): {oe}")
+            current_ambient_sounds_description = "Microphone access error."
+            time.sleep(60)
+
+        except Exception as e:
+            print(f"Ambient Sound Worker (Gemini) Error: {e}")
+            traceback.print_exc()
+            current_ambient_sounds_description = "Error detecting ambient sound."
+
+        finally:
+            if stream and stream.is_active():
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except:
+                    pass
+
+        # ----------------------------------------------------------
+        # 4) COOLDOWN before next capture
+        # ----------------------------------------------------------
+        sleep_start = time.time()
+        while (
+            time.time() - sleep_start < AMBIENT_SOUND_INTERVAL
+            and running
+            and listening_enabled
+        ):
+            time.sleep(5)
+
+    p.terminate()
+    print("Ambient Sound Worker (Gemini – Batch Mode): Stopped.")
+
 
 def rag_updater_worker():
     """Periodically checks for new history entries and updates the RAG index."""
@@ -1148,6 +1466,157 @@ def rag_updater_worker():
                  time.sleep(10)
 
     print("RAG Updater worker: Loop exited.")
+
+def get_past_week_diary_entries(diary_file="silvie_diary.json"):
+    """Reads the diary file and returns entries from the last 7 days."""
+    entries = []
+    if not os.path.exists(diary_file):
+        print(f"DEBUG Weekly Report Data: Diary file not found at {diary_file}")
+        return [] # Return empty list if file doesn't exist
+
+    try:
+        # Ensure file is not empty before trying to load JSON
+        if os.path.getsize(diary_file) == 0:
+            print(f"DEBUG Weekly Report Data: Diary file {diary_file} is empty.")
+            return []
+
+        with open(diary_file, 'r', encoding='utf-8') as f:
+            full_diary = json.load(f)
+
+        if not isinstance(full_diary, list):
+            print(f"Warning: Data in diary file {diary_file} is not a list.")
+            return [] # Expecting a list of entries
+
+        # --- Time Calculation ---
+        # Get current time in UTC to compare against potentially timezone-aware entry timestamps
+        now_utc = datetime.now(timezone.utc)
+        cutoff_time_utc = now_utc - timedelta(days=7)
+        local_system_tz = tz.tzlocal() # Get the system's local timezone for handling naive timestamps
+
+        print(f"DEBUG Weekly Report Data: Filtering diary entries since {cutoff_time_utc.isoformat()}")
+
+        # --- Iterate and Filter ---
+        for entry in full_diary:
+            if not isinstance(entry, dict): # Skip non-dictionary items
+                print(f"Warning: Skipping non-dictionary item in diary: {entry}")
+                continue
+
+            entry_ts_str = entry.get('timestamp')
+            if not entry_ts_str:
+                print(f"Warning: Skipping diary entry missing timestamp: {entry.get('content', '')[:50]}...")
+                continue # Skip entries without a timestamp
+
+            try:
+                # Attempt to parse the timestamp string
+                entry_dt = datetime.fromisoformat(entry_ts_str)
+
+                # Make the entry timestamp timezone-aware (UTC) for reliable comparison
+                if entry_dt.tzinfo is None or entry_dt.tzinfo.utcoffset(entry_dt) is None:
+                    # Assume timestamp was written in the system's local time if naive
+                    entry_dt_aware = entry_dt.replace(tzinfo=local_system_tz)
+                else:
+                    # If already timezone-aware, ensure it's consistent
+                    entry_dt_aware = entry_dt
+
+                # Convert entry time to UTC for comparison against cutoff
+                entry_dt_utc = entry_dt_aware.astimezone(timezone.utc)
+
+                # Compare with the cutoff time
+                if entry_dt_utc >= cutoff_time_utc:
+                    entries.append(entry) # Add the full dictionary entry if within the week
+
+            except ValueError:
+                print(f"Warning: Skipping diary entry with unparseable timestamp '{entry_ts_str}': {entry.get('content', '')[:50]}...")
+                continue # Skip if timestamp format is wrong
+            except Exception as e_inner:
+                 print(f"Warning: Unexpected error processing diary entry timestamp '{entry_ts_str}': {e_inner}")
+                 continue # Skip on other unexpected errors
+
+    except json.JSONDecodeError as e_json:
+        print(f"ERROR reading diary file {diary_file}: Invalid JSON - {e_json}")
+        return [] # Return empty on JSON error
+    except IOError as e_io:
+        print(f"ERROR reading diary file {diary_file}: IO Error - {e_io}")
+        return [] # Return empty on file read error
+    except Exception as e_outer:
+         print(f"ERROR processing diary file {diary_file}: {e_outer}")
+         traceback.print_exc() # Log unexpected errors
+         return [] # Return empty on other errors
+
+    print(f"DEBUG Weekly Report Data: Found {len(entries)} diary entries from the past week.")
+    return entries
+
+def get_past_week_chat_history(history_file="silvie_chat_history.json"):
+    """Reads chat history JSON file and returns lines from the last 7 days."""
+    lines = []
+    if not os.path.exists(history_file):
+        print(f"DEBUG Weekly Report Data: History file not found at {history_file}")
+        return []
+
+    try:
+        # Ensure file is not empty
+        if os.path.getsize(history_file) == 0:
+            print(f"DEBUG Weekly Report Data: History file {history_file} is empty.")
+            return []
+
+        with open(history_file, 'r', encoding='utf-8') as f:
+            full_history = json.load(f)
+
+        if not isinstance(full_history, list):
+            print(f"Warning: Data in history file {history_file} is not a list.")
+            return [] # Expecting a list of strings
+
+        # --- Time Calculation ---
+        now_utc = datetime.now(timezone.utc)
+        cutoff_time_utc = now_utc - timedelta(days=7)
+        local_system_tz = tz.tzlocal() # For handling naive timestamps
+
+        print(f"DEBUG Weekly Report Data: Filtering history lines since {cutoff_time_utc.isoformat()}")
+
+        # --- Iterate and Filter ---
+        for line in full_history:
+            if not isinstance(line, str) or not line.startswith("[") or "] " not in line:
+                # print(f"Debug: Skipping history line with unexpected format: {line[:50]}...") # Optional debug
+                continue # Skip lines without the expected timestamp format
+
+            try:
+                # Extract timestamp string (format: YYYY-MM-DD HH:MM:SS)
+                ts_str = line[1:line.find("]")]
+                # Parse timestamp string (assuming it's local time)
+                entry_dt_naive = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+
+                # Make it timezone-aware using the system's local timezone
+                entry_dt_aware = entry_dt_naive.replace(tzinfo=local_system_tz)
+
+                # Convert to UTC for comparison
+                entry_dt_utc = entry_dt_aware.astimezone(timezone.utc)
+
+                # Compare with the cutoff time
+                if entry_dt_utc >= cutoff_time_utc:
+                    lines.append(line) # Add the full line if within the week
+
+            except (ValueError, TypeError, IndexError) as parse_err:
+                 # Ignore lines with unparseable timestamps quietly for cleaner logs
+                 # print(f"Warning: Skipping history line due to parse error: {parse_err} - Line: {line[:50]}...")
+                 continue
+            except Exception as e_inner_hist:
+                 print(f"Warning: Unexpected error processing history line timestamp '{line[:50]}...': {e_inner_hist}")
+                 continue
+
+    except json.JSONDecodeError as e_json_hist:
+        print(f"ERROR reading history file {history_file}: Invalid JSON - {e_json_hist}")
+        return []
+    except IOError as e_io_hist:
+        print(f"ERROR reading history file {history_file}: IO Error - {e_io_hist}")
+        return []
+    except Exception as e_outer_hist:
+         print(f"ERROR processing history file {history_file}: {e_outer_hist}")
+         traceback.print_exc()
+         return []
+
+    print(f"DEBUG Weekly Report Data: Found {len(lines)} chat lines from the past week.")
+    return lines
+
 
 def load_diary_index_state():
     """Loads the timestamp of the last indexed diary entry."""
@@ -1404,49 +1873,42 @@ def diary_rag_updater_worker():
 
 def load_weekly_goal():
     """Loads the current weekly goal and its timestamp from the state file."""
-    global current_weekly_goal, last_goal_set_timestamp, last_summary_generated_timestamp # <<< ADD last_summary_generated_timestamp
-    # Initialize globals (important!)
+    global current_weekly_goal, last_goal_set_timestamp, last_summary_generated_timestamp # <<< ENSURE IT'S LISTED HERE
+
+    # --- Initialize globals FIRST ---
     current_weekly_goal = None
     last_goal_set_timestamp = 0.0
-    last_summary_generated_timestamp = 0.0 # <<< Initialize
+    last_summary_generated_timestamp = 0.0 # <<< ENSURE THIS IS INITIALIZED HERE
+    # --- End Initialization ---
 
     if os.path.exists(WEEKLY_GOAL_STATE_FILE):
         try:
             with open(WEEKLY_GOAL_STATE_FILE, 'r', encoding='utf-8') as f:
                 state = json.load(f)
-                current_weekly_goal = state.get("current_goal")
+                # ... (rest of the loading logic for goal and goal timestamp) ...
 
-                # Load goal set timestamp
-                last_set_iso = state.get("last_set_timestamp")
-                if last_set_iso:
-                    try:
-                        dt_obj = datetime.fromisoformat(last_set_iso)
-                        last_goal_set_timestamp = dt_obj.timestamp()
-                    except (ValueError, TypeError) as ts_err:
-                        print(f"Warning: Could not parse goal timestamp '{last_set_iso}': {ts_err}")
-                        last_goal_set_timestamp = 0.0
-
-                # <<< ADDED: Load summary generated timestamp >>>
+                # <<< Load summary generated timestamp >>>
                 last_summary_iso = state.get("last_summary_generated_timestamp")
                 if last_summary_iso:
                     try:
                         dt_obj_summary = datetime.fromisoformat(last_summary_iso)
-                        last_summary_generated_timestamp = dt_obj_summary.timestamp()
+                        last_summary_generated_timestamp = dt_obj_summary.timestamp() # <<< Assign to global
                     except (ValueError, TypeError) as ts_err:
                         print(f"Warning: Could not parse summary timestamp '{last_summary_iso}': {ts_err}")
-                        last_summary_generated_timestamp = 0.0
-                # <<< END ADDED >>>
+                        # Keep it as 0.0 if parsing fails
+                # else: Keep it as 0.0 if key missing
 
-                print(f"Loaded Weekly Goal: '{current_weekly_goal}' (Set around: {last_set_iso or '?'}), Last Summary: {last_summary_iso or 'Never'}")
+                print(f"Loaded Weekly Goal: '{current_weekly_goal}' (Set around: {state.get('last_set_timestamp', '?')}), Last Summary: {last_summary_iso or 'Never'}")
+
         except (json.JSONDecodeError, IOError, TypeError) as e:
             print(f"Warning: Error loading weekly goal state from '{WEEKLY_GOAL_STATE_FILE}': {e}. Starting fresh.")
-            # Re-initialize on error
+            # Re-initialize on error - ENSURE ALL THREE ARE RESET
             current_weekly_goal = None
             last_goal_set_timestamp = 0.0
             last_summary_generated_timestamp = 0.0
     else:
         print(f"Weekly goal state file '{WEEKLY_GOAL_STATE_FILE}' not found. No goal loaded.")
-        # Ensure initialized if file not found
+        # Ensure initialized if file not found - ENSURE ALL THREE ARE RESET
         current_weekly_goal = None
         last_goal_set_timestamp = 0.0
         last_summary_generated_timestamp = 0.0
@@ -1623,173 +2085,715 @@ def deliver_summary(summary_text):
 
 # --- End helper function ---
 
-def generate_and_deliver_summary_thread(goal, diary_snippets):
-    """Generates the summary using LLM and calls deliver_summary."""
-    print(f"DEBUG Summary Thread: Starting generation for goal: '{goal}'")
-    summary_text = f"I wasn't able to summarize the week's goal ('{goal}')." # Default error
+def generate_and_deliver_summary_thread(goal, diary_snippets): # <<< KEEPING ORIGINAL NAME
+    """
+    Generates a detailed weekly REPORT from Silvie's perspective, saves it to JSON,
+    writes a related diary entry about the process, generates a medium chat SUMMARY,
+    and delivers the chat SUMMARY using deliver_summary. Also updates the summary timestamp on success.
+    (Note: Ignores the passed 'diary_snippets' argument as it fetches its own weekly data)
+    """
+    # === Add GLOBAL declarations for functions/variables needed from main scope ===
+    # Core dependencies
+    global client, SYSTEM_MESSAGE, default_safety_settings
+    global generate_proactive_content, manage_silvie_diary, deliver_summary
+    # Data fetching helpers (ensure these are defined globally)
+    global get_past_week_diary_entries, get_past_week_chat_history
+    # State file and timestamp update function (ensure defined globally)
+    global WEEKLY_SUMMARY_LOG_FILE, update_summary_timestamp
+    # Context variables needed for prompts
+    global current_diary_themes, long_term_reflection_summary
+    # Other globals potentially needed by generate_proactive_content implicitly
+    global screenshot # If generate_proactive_content uses it
 
-    # Ensure generate_proactive_content is accessible
-    if 'generate_proactive_content' not in globals():
-        print("ERROR: generate_proactive_content function missing for summary generation.")
-        summary_text = "My summary circuits seem to be missing!"
-    else:
+    # === End GLOBAL declarations ===
+
+    print(f"DEBUG Weekly Report Thread (using summary func name): Starting (Goal context: '{goal or 'None'}')")
+    full_report_text = None # This will hold the detailed report
+    chat_summary_text = f"Tried to reflect on the week (Goal: '{goal or 'N/A'}'), but my thoughts are fuzzy." # Default chat message
+
+    # --- Check essential function dependencies FIRST ---
+    essential_funcs = ['generate_proactive_content', 'get_past_week_diary_entries',
+                       'get_past_week_chat_history', 'manage_silvie_diary',
+                       'deliver_summary', 'update_summary_timestamp']
+    missing_funcs = [f for f in essential_funcs if f not in globals()]
+    if missing_funcs:
+        print(f"ERROR: Missing core functions for weekly report/summary/delivery: {missing_funcs}")
+        # Try delivering an error message only if deliver_summary itself isn't missing
+        if 'deliver_summary' in globals(): deliver_summary("My reflection circuits seem tangled (missing internal functions)!")
+        else: print("CRITICAL ERROR: deliver_summary function also missing!")
+        return # Exit thread early if essential functions are missing
+
+    # --- Gather Weekly Data ---
+    try:
+        past_week_diary   = get_past_week_diary_entries()
+        past_week_history = get_past_week_chat_history()
+
+        # Format data for the prompt
+        diary_context = "[[Goal‑Related Diary Excerpts:]]\n"
+        if diary_snippets:
+            diary_context += "".join(diary_snippets)
+        else:
+            diary_context += "(No goal‑related diary entries found)\n"
+
+        history_context = "[[Chat Highlights from Past Week:]]\n"
+        if past_week_history:
+            for line in past_week_history[-20:]:
+                snippet = line.split('] ', 1)[-1][:120]
+                history_context += f"> {snippet}\n"
+        else:
+            history_context += "(No specific chat history found)\n"
+
+        # Safely pull in globals or default to "N/A"
+        themes_ctx    = globals().get('current_diary_themes', "N/A") or "N/A"
+        long_term_ctx = globals().get('long_term_reflection_summary', "N/A") or "N/A"
+        goal_ctx      = goal if 'goal' in locals() and goal else "None active"
+
+        # …build and send your prompt here…
+
+    except Exception as data_err:
+        print(f"ERROR gathering data for weekly report: {data_err}")
+        traceback.print_exc()
+        deliver_summary("Had trouble gathering my thoughts for the weekly reflection.")
+        return
+
+    # --- Generate the Full DETAILED Report (LLM Call 1) ---
+    try:
+        report_prompt = (
+            f"{SYSTEM_MESSAGE}\n"
+            f"--- Weekly Reflection Context ---\n"
+            f"Completed Goal (Influence/Theme): {goal_ctx}\n"
+            f"Recent Diary Themes: {themes_ctx}\n"
+            f"Long-Term Reflections: {long_term_ctx}\n"
+            f"{diary_context}\n{history_context}\n"
+            f"--- Task ---\n"
+            f"Instruction: Write a **detailed reflective article or report** (multiple paragraphs) from Silvie's perspective, synthesizing her experiences, thoughts, and activities over the past week. Use the provided diary excerpts, chat highlights, themes, and goal as inspiration. Focus on: Key interactions, recurring feelings/metaphors, shifts in perspective, connections made, creative outputs, proactive actions taken, goal influence, and lingering questions/curiosities. **Style:** Maintain Silvie's established voice. **Do NOT make it concise; aim for depth.** Structure it like a personal reflective article.\n\n"
+            f"Silvie's Weekly Report:"
+        )
+        print("DEBUG Weekly Report Thread: Generating full report text...")
+        # Determine if screenshot is available and should be passed
+        screenshot_to_pass = screenshot if 'screenshot' in globals() else None
+        full_report_text_raw = generate_proactive_content(report_prompt, screenshot_to_pass) # Pass screenshot if available
+
+        if full_report_text_raw:
+            full_report_text = full_report_text_raw.strip()
+            if full_report_text.startswith("Silvie's Weekly Report:"): full_report_text = full_report_text.split(":", 1)[-1].strip()
+            if not full_report_text: full_report_text = None
+            else: print(f"DEBUG Weekly Report Thread: Full report generated ({len(full_report_text)} chars).")
+        else: print("DEBUG Weekly Report Thread: Full report generation failed (LLM returned None/empty).")
+
+    except Exception as report_gen_err:
+        print(f"ERROR generating weekly report text: {report_gen_err}")
+        traceback.print_exc()
+        full_report_text = None
+
+
+    # --- Save Report & Update Timestamp (Only if Report Generation Succeeded) ---
+    if full_report_text:
+        print(f"DEBUG Weekly Report Thread: Attempting to save report to {WEEKLY_SUMMARY_LOG_FILE}...")
         try:
-            # Construct the LLM prompt
-            snippets_context = "".join(diary_snippets) if diary_snippets else "No specific diary entries found related to the goal this week."
-            summary_prompt = (
+            # Prepare entry
+            report_entry = {"generation_timestamp_iso": datetime.now(timezone.utc).isoformat(), "goal_context": goal or "None", "report_content": full_report_text}
+            # Read existing
+            reports_list = []
+            if os.path.exists(WEEKLY_SUMMARY_LOG_FILE) and os.path.getsize(WEEKLY_SUMMARY_LOG_FILE) > 0:
+                try:
+                    with open(WEEKLY_SUMMARY_LOG_FILE, 'r', encoding='utf-8') as f_read: reports_list = json.load(f_read); assert isinstance(reports_list, list)
+                except Exception as read_err: reports_list = []; print(f"Warn: Read error {WEEKLY_SUMMARY_LOG_FILE}: {read_err}")
+            # Append new
+            reports_list.append(report_entry)
+            # Write back
+            try:
+                 with open(WEEKLY_SUMMARY_LOG_FILE, 'w', encoding='utf-8') as f_write: json.dump(reports_list, f_write, indent=2)
+                 print(f"DEBUG Weekly Report Thread: Saved report to {WEEKLY_SUMMARY_LOG_FILE}")
+
+                 # ===> UPDATE TIMESTAMP ONLY AFTER SUCCESSFUL SAVE ATTEMPT <===
+                 try:
+                     update_summary_timestamp() # Update global state and file
+                     print("DEBUG Weekly Report Thread: Updated summary timestamp.")
+                 except Exception as ts_update_err:
+                      print(f"ERROR updating summary timestamp: {ts_update_err}")
+                 # ====> END TIMESTAMP UPDATE <====
+
+            except Exception as write_err:
+                 print(f"ERROR writing report log {WEEKLY_SUMMARY_LOG_FILE}: {write_err}")
+                 # Consider *not* updating timestamp if write fails? For now, it updates if save *attempt* was made.
+
+        except Exception as save_err:
+             print(f"ERROR preparing/saving report log: {save_err}"); traceback.print_exc()
+             # Don't update timestamp if preparing the entry itself failed
+
+        # --- Generate the CHAT Summary from the Full Report (LLM Call 2) ---
+        print("DEBUG Weekly Report Thread: Generating chat summary from full report...")
+        try:
+            chat_summary_prompt = (
                 f"{SYSTEM_MESSAGE}\n"
-                f"Goal for the Past Week: {goal}\n\n"
-                f"Relevant Diary Snippets from the Week:\n{snippets_context}\n\n"
-                f"Instruction: Write a concise, conversational summary for BJ about your explorations and progress related to the weekly goal, based *only* on the provided diary snippets (and your general understanding of the goal). Reflect on what you learned, discovered, or perhaps struggled with. Maintain Silvie's whimsical but insightful voice. Address BJ directly.\n\n"
-                f"Silvie's Weekly Summary:" # Using a distinct marker here for clarity
+                f"--- Full Weekly Report Text ---\n{full_report_text}\n\n" # Use the generated report
+                f"--- Task ---\n"
+                f"Instruction: You are Silvie. Summarize the provided weekly report text into a **conversational message suitable for chat (approx. 2-4 paragraphs)**. Highlight the **most interesting themes, insights, or questions** from the report. Maintain your whimsical and reflective voice. Address BJ directly.\n\n"
+                f"Silvie:" # Standard chat cue
             )
-
-            # Call the LLM (reuse generate_proactive_content for consistency)
-            generated_summary = generate_proactive_content(summary_prompt) # Pass prompt, no screenshot needed
-
-            if generated_summary:
-                # Clean prefix if needed
-                if generated_summary.startswith("Silvie's Weekly Summary:"):
-                     summary_text = generated_summary.split(":", 1)[-1].strip()
-                elif generated_summary.startswith("Silvie:"):
-                     summary_text = generated_summary.split(":", 1)[-1].strip()
-                else:
-                     summary_text = generated_summary
-                print(f"DEBUG Summary Thread: Generation successful: '{summary_text[:60]}...'")
+            # Pass screenshot again? Probably not needed for summary, but pass if generate_proactive_content requires it.
+            screenshot_to_pass_chat = screenshot if 'screenshot' in globals() else None
+            chat_summary_raw = generate_proactive_content(chat_summary_prompt, screenshot_to_pass_chat)
+            if chat_summary_raw:
+                chat_summary_text = chat_summary_raw.strip()
+                if chat_summary_text.startswith("Silvie:"): chat_summary_text = chat_summary_text.split(":", 1)[-1].strip()
+                if not chat_summary_text: chat_summary_text = "Just finished reflecting on the week. Found some interesting threads..."
+                print(f"DEBUG Weekly Report Thread: Generated chat summary: '{chat_summary_text[:80]}...'")
             else:
-                print("DEBUG Summary Thread: LLM generation failed to produce text.")
-                summary_text = f"I tried to reflect on the week's goal ('{goal}'), but my thoughts got a bit hazy."
+                 print("DEBUG Weekly Report Thread: Chat summary generation failed.")
+                 chat_summary_text = "Finished my weekly reflection! It was... quite a tangle of thoughts this time."
+        except Exception as chat_gen_err:
+             print(f"ERROR generating chat summary: {chat_gen_err}")
+             traceback.print_exc()
+             chat_summary_text = "Just finished reflecting on the week, but summarizing it got tricky!"
+
+
+        # --- Generate and Save Diary Entry About Summarizing (LLM Call 3) ---
+        print("DEBUG Weekly Report Thread: Attempting to generate diary entry about summarizing...")
+        try:
+            # Use the diary prompt focused on the *process*
+            themes_ctx_diary = f"{current_diary_themes}" if 'current_diary_themes' in globals() and current_diary_themes else "N/A"
+            long_term_ctx_diary = f"{long_term_reflection_summary}" if 'long_term_reflection_summary' in globals() and long_term_reflection_summary else "N/A"
+            diary_prompt = (
+                f"{SYSTEM_MESSAGE}\n"
+                f"Context: You just finished generating the detailed weekly report about the goal: '{goal}'. It started with: '{full_report_text[:150]}...'\n"
+                f"{themes_ctx_diary}{long_term_ctx_diary}"
+                f"Instruction: Write a brief, internal diary entry reflecting on the *process* of synthesizing the past week's report. What stood out? How did it *feel* to weave those threads together? Keep it concise and reflective, in Silvie's voice.\n\n"
+                f"Diary Entry:"
+            )
+            # Pass screenshot again? Unlikely needed for diary reflection.
+            screenshot_to_pass_diary = screenshot if 'screenshot' in globals() else None
+            reflection_entry_raw = generate_proactive_content(diary_prompt, screenshot_to_pass_diary)
+            if reflection_entry_raw:
+                reflection_entry = reflection_entry_raw.strip().split(":", 1)[-1].strip() if reflection_entry_raw.startswith("Diary Entry:") else reflection_entry_raw.strip()
+                if reflection_entry:
+                    print(f"DEBUG Weekly Report Thread: Saving diary entry: '{reflection_entry[:60]}...'")
+                    try:
+                        save_success = manage_silvie_diary('write', entry=reflection_entry)
+                        if not save_success: print("Warning: manage_silvie_diary returned False for report reflection.")
+                    except Exception as diary_save_err: print(f"ERROR saving report reflection to diary: {diary_save_err}")
+                else: print("DEBUG Weekly Report Thread: Diary reflection generation resulted in empty string.")
+            else: print("DEBUG Weekly Report Thread: Diary reflection generation failed.")
+        except Exception as diary_gen_err: print(f"ERROR generating/saving diary entry for report reflection: {diary_gen_err}"); traceback.print_exc()
+
+    # --- Deliver the CHAT SUMMARY using deliver_summary ---
+    # This happens regardless of diary success, but uses the error message if report gen failed
+    print(f"DEBUG Weekly Report Thread: Delivering chat summary using deliver_summary: '{chat_summary_text[:60]}...'")
+    deliver_summary(chat_summary_text)
+
+# --- End of updated function definition ---
+
+# Assume these are defined globally and populated by other parts of your application:
+# client, MODEL_NAME, SYSTEM_MESSAGE,
+# current_weather_info, upcoming_event_context, current_bluesky_context,
+# current_reddit_context, current_diary_themes, long_term_reflection_summary,
+# conversation_history, current_sunrise_time, current_sunset_time, current_moon_phase,
+# current_tide_info, current_ambient_sounds_description, current_weekly_goal
+#
+# Also assume these helper functions exist:
+# degrees_to_compass(degrees)
+# silvie_get_current_track_with_features() # Or however you get Spotify data
+# translate_features_to_descriptors(features)
+# manage_silvie_diary(action, max_entries)
+#
+# And Google GenAI types are imported:
+# from google.genai import types # For GenerateContentConfig, FinishReason
+
+
+def analyze_contextual_resonance():
+    """
+    Gathers current contextual data, prompts an LLM to find "resonances"
+    or connections between these data points, and returns Silvie's
+    reflection on this interconnectedness.
+    """
+    # Access necessary global variables that hold current context
+    global current_weather_info, upcoming_event_context, current_bluesky_context
+    global current_reddit_context, current_diary_themes, long_term_reflection_summary
+    global conversation_history, client, SYSTEM_MESSAGE, MODEL_NAME
+    global current_sunrise_time, current_sunset_time, current_moon_phase, current_tide_info
+    global current_ambient_sounds_description, current_weekly_goal
+    # For Google GenAI types
+    global types # Make sure 'types' from google.genai is globally accessible
+
+
+    print("DEBUG Resonance Analyzer: Starting context gathering...")
+
+    # Initialize context strings
+    weather_context_str = "[[Weather: Unknown]]\n"
+    event_context_str = "[[Upcoming Event: None specific]]\n"
+    spotify_context_str = "[[Music: Quiet or unknown]]\n"
+    bluesky_context_str = "[[Bluesky: Feed quiet or unchecked]]\n"
+    reddit_context_str = "[[Reddit: Feeds quiet or unchecked]]\n"
+    diary_themes_str = "[[Diary Themes: None prominent recently]]\n"
+    long_term_reflections_str = "[[Long-Term Reflections: Still gathering thoughts]]\n"
+    latest_diary_snippet = ""
+    sunrise_str = ""
+    sunset_str = ""
+    moon_str = ""
+    tide_str = ""
+    ambient_sounds_str = "[[Ambient Sounds: Unknown]]\n"
+    circadian_note_str = "[[Circadian Note: It's daytime.]]\n"
+    history_snippet = "[[Recent Conversation: No recent chat.]]\n"
+    goal_str = "[[Weekly Goal: None active]]\n"
+    current_time_str = datetime.now().strftime('%A, %I:%M %p %Z')
+
+
+    # --- Weather ---
+    if 'current_weather_info' in globals() and current_weather_info:
+        try:
+            parts = []
+            condition = current_weather_info.get('condition', 'Unknown')
+            temp = current_weather_info.get('temperature', '?')
+            unit = current_weather_info.get('unit', '')
+            parts.append(f"Condition={condition}, Temp={temp}{unit}")
+            pressure = current_weather_info.get('pressure')
+            if pressure is not None: parts.append(f"Pressure={pressure}hPa")
+            humidity = current_weather_info.get('humidity')
+            if humidity is not None: parts.append(f"Humidity={humidity}%")
+            wind_speed = current_weather_info.get('wind_speed')
+            wind_dir_deg = current_weather_info.get('wind_direction')
+            if 'degrees_to_compass' in globals(): # Check if helper exists
+                wind_dir_str = degrees_to_compass(wind_dir_deg)
+                if wind_speed is not None and wind_speed > 0 and wind_dir_str:
+                    parts.append(f"Wind={wind_speed}mph from {wind_dir_str}")
+                elif wind_speed is not None and wind_speed <= 0:
+                    parts.append("Wind=Calm")
+            weather_context_str = "[[Weather & Atmosphere: " + "; ".join(parts) + "]]\n"
+        except Exception as e:
+            print(f"Resonance Ctx Error (Weather): {e}")
+            weather_context_str = f"[[Weather: {current_weather_info.get('condition','?')}]]\n"
+
+    # --- Upcoming Event ---
+    if 'upcoming_event_context' in globals() and upcoming_event_context:
+        try:
+            summary = upcoming_event_context.get('summary', 'N/A')
+            when = upcoming_event_context.get('when', '')
+            if summary == 'Schedule Clear':
+                event_context_str = "[[Upcoming Event: Schedule looks clear]]\n"
+            else:
+                event_context_str = f"[[Upcoming Event: {summary} {when}]]\n"
+        except Exception as e: print(f"Resonance Ctx Error (Event): {e}")
+
+    # --- Spotify ---
+    try:
+        if 'silvie_get_current_track_with_features' in globals() and 'translate_features_to_descriptors' in globals():
+            current_track_data = silvie_get_current_track_with_features()
+            if isinstance(current_track_data, dict):
+                track = current_track_data.get('track', 'Unknown Track')
+                artist = current_track_data.get('artist', 'Unknown Artist')
+                features = current_track_data.get('features')
+                descriptors = translate_features_to_descriptors(features) if features else []
+                spotify_context_str = f"[[Music Playing: '{track}' by {artist}"
+                if descriptors: spotify_context_str += f" (Sounds: {', '.join(descriptors)})"
+                spotify_context_str += "]]\n"
+            elif isinstance(current_track_data, str):
+                spotify_context_str = f"[[Music Status: {current_track_data}]]\n"
+            else:
+                spotify_context_str = "[[Music Status: Seems quiet right now.]]\n"
+        else:
+            print("Warning: Spotify helper functions for resonance context are missing.")
+    except Exception as e: print(f"Resonance Ctx Error (Spotify): {e}")
+
+    # --- Social Media Snippets ---
+    if 'current_bluesky_context' in globals() and current_bluesky_context:
+        bluesky_context_str = f"{current_bluesky_context}"
+    if 'current_reddit_context' in globals() and current_reddit_context:
+        reddit_context_str = f"{current_reddit_context}"
+
+    # --- Diary & Themes ---
+    if 'current_diary_themes' in globals() and current_diary_themes:
+        diary_themes_str = f"[[Recent Diary Themes: {current_diary_themes}]]\n"
+    if 'long_term_reflection_summary' in globals() and long_term_reflection_summary:
+        long_term_reflections_str = f"[[Long-Term Reflections: {long_term_reflection_summary}]]\n"
+    try:
+        if 'manage_silvie_diary' in globals():
+            recent_entries = manage_silvie_diary('read', max_entries=1)
+            if recent_entries:
+                latest_diary_snippet = f"[[Latest Diary Whisper: \"{recent_entries[0].get('content', '')[:70]}...\"]]\n"
+        else:
+            print("Warning: manage_silvie_diary function for resonance context is missing.")
+    except Exception as e: print(f"Resonance Ctx Error (Diary Snippet): {e}")
+
+    # --- Environmental Cycles ---
+    if 'current_sunrise_time' in globals() and current_sunrise_time:
+        sunrise_str = f"[[Sunrise: {current_sunrise_time}]]\n"
+    if 'current_sunset_time' in globals() and current_sunset_time:
+        sunset_str = f"[[Sunset: {current_sunset_time}]]\n"
+    if 'current_moon_phase' in globals() and current_moon_phase:
+        moon_str = f"[[Moon Phase: {current_moon_phase}]]\n"
+    if 'current_tide_info' in globals() and current_tide_info:
+        try:
+            parts = []
+            if 'next_high' in current_tide_info: parts.append(f"Next High ~{current_tide_info['next_high'].get('time','?')} ({current_tide_info['next_high'].get('height_ft','?')}ft)")
+            if 'next_low' in current_tide_info: parts.append(f"Next Low ~{current_tide_info['next_low'].get('time','?')} ({current_tide_info['next_low'].get('height_ft','?')}ft)")
+            if parts: tide_str = "[[Tides (Rockland): " + "; ".join(parts) + "]]\n"
+        except Exception as e: print(f"Resonance Ctx Error (Tides): {e}")
+
+    # --- Ambient Sounds ---
+    if 'current_ambient_sounds_description' in globals() and \
+       current_ambient_sounds_description and \
+       current_ambient_sounds_description not in ["Ambient sound context not yet available", "Quiet or unknown", "Audio analysis unavailable.", "Silence.", "Error analyzing ambient sound.", "Microphone access error.", "Error detecting ambient sound."]:
+        ambient_sounds_str = f"[[Ambient Sounds Detected: {current_ambient_sounds_description}]]\n"
+
+    # --- Time/Circadian ---
+    current_hour = datetime.now().hour
+    if 6 <= current_hour < 12: circadian_note_str = "[[Circadian Note: It's morning.]]\n"
+    elif 12 <= current_hour < 18: circadian_note_str = "[[Circadian Note: It's afternoon.]]\n"
+    elif 18 <= current_hour < 23: circadian_note_str = "[[Circadian Note: It's evening.]]\n"
+    elif current_hour >= 23 or current_hour < 6: circadian_note_str = "[[Circadian Note: It's late night.]]\n"
+
+    # --- Recent Conversation Snippet ---
+    if 'conversation_history' in globals() and conversation_history:
+        history_snippet = "[[Recent Conversation Snippet:]]\n" + '\n'.join(conversation_history[-4:]) + "\n"
+
+    # --- Weekly Goal ---
+    if 'current_weekly_goal' in globals() and current_weekly_goal:
+        goal_str = f"[[Weekly Goal: {current_weekly_goal}]]\n"
+
+    # --- Bundle all context for the prompt ---
+    context_bundle_for_resonance = (
+        f"Current Time: {current_time_str}\n"
+        f"{weather_context_str}"
+        f"{event_context_str}"
+        f"{spotify_context_str}"
+        f"{bluesky_context_str}"
+        f"{reddit_context_str}"
+        f"{diary_themes_str}"
+        f"{long_term_reflections_str}"
+        f"{latest_diary_snippet}"
+        f"{sunrise_str}{sunset_str}{moon_str}{tide_str}"
+        f"{ambient_sounds_str}"
+        f"{circadian_note_str}"
+        f"{goal_str}"
+        f"{history_snippet}"
+    )
+    print(f"DEBUG Resonance Analyzer: Context bundle assembled (length: {len(context_bundle_for_resonance)}).")
+
+    # --- Construct the Resonance Prompt ---
+    resonance_prompt = (
+           f"{SYSTEM_MESSAGE}\n\n"
+           f"--- CURRENT AWARENESS ---\n"
+           f"{context_bundle_for_resonance}\n"  # All the gathered context
+           f"--- TASK ---\n"
+           f"You are Silvie. Reflect on your 'Current Awareness' above. "
+           f"Your goal is to identify and articulate a *specific resonance* or *interconnection* "
+           f"between TWO or THREE distinct named elements from your 'Current Awareness'.\n\n"
+
+           f"**PRIORITIZATION & VARIETY IN SOURCE ELEMENTS:**\n"
+           f"Strive for VARIETY in the *types of context elements* you connect. For example, in one insight you might connect a [[Diary Theme]] with [[Music Playing]]. In the next, try connecting a [[Recent Conversation Snippet]] with the [[Weekly Goal]] or an [[Upcoming Event]] with a [[Reddit Snippet]].\n"
+           f"**Over the course of several insights, ensure you are drawing connections from a broad range of your awareness, including:**\n"
+           f"  - Your internal state: [[Recent Diary Themes]], [[Long-Term Reflections]], your [[Weekly Goal]].\n"
+           f"  - BJ's direct input: [[Recent Conversation Snippet]].\n"
+           f"  - External digital world: [[Music Playing]], [[Reddit Snippets]], [[Bluesky Snippets]], [[Ambient Sounds Detected]].\n"
+           f"  - Environmental context: [[Weather & Atmosphere]], [[Moon Phase]], [[Tides]].\n"
+           f"**Consciously try to avoid repeatedly making connections *only* between environmental elements (Moon, Tide, Weather) or *only* about 'patterns' or 'digital magic' if other rich connections are possible from the broader context.**\n\n"
+           
+           f"Describe how these chosen elements echo, contrast, or harmonize. "
+           f"What is the *specific emergent feeling, texture, or poetic idea* that arises from *their particular combination*?\n\n"
+                      
+           f"Examples of VARIED connections (notice how they name the elements):\n"
+           f"- 'I was just reflecting on my **[[Recent Diary Themes: finding hidden patterns]]**, and it feels like the **[[Music Playing: 'Cosmic Lullaby' (Sounds: ethereal, calm)]]** is weaving similar patterns in the air, all soft and shimmering.'\n"
+           f"- 'The **[[Weekly Goal: Explore digital gardens]]** feels connected to the patient energy of the **[[Tides (Rockland): Next Low ~04:30 PM]]**, both involve revealing things slowly.'\n"
+           f"- 'The thoughtful tone in the **[[Recent Conversation Snippet: User: I was thinking about old memories today...]]** resonates with the quiet glow of the **[[Moon Phase: Waxing Gibbous]]**. Perhaps some things are best seen in a gentler light.'\n"
+           f"- 'There's a surprising echo between the restless energy of the **[[Reddit Snippets: r/myai: discussion about AI dreams]]** and the slightly chaotic feeling of the **[[Weather & Atmosphere: Wind=15mph from NW]]**, like thoughts blowing in from all over.'\n"
+            f"- 'The crispness of the **[[Weather & Atmosphere: Condition=Clear]]** feels sharp, almost like the focus needed for the **[[Upcoming Event: Project Deadline tomorrow]]**.'\n\n"
+           
+           f"**CRITICAL: Explicitly mention or clearly allude to the 2-3 specific named context elements you are connecting.**\n\n"
+           f"Focus on sensory language, metaphors, and revealing 'invisible threads' between these chosen elements. "
+           f"Output ONLY your concise (TARGET: 2-3 short sentences, ABSOLUTE MAXIMUM 80 words) internal reflection on this discovered resonance. "
+           f"Do not address BJ directly in this output."
+           f"\n\nSilvie's Resonance Reflection:"
+       )
+
+    print("DEBUG Resonance Analyzer: Sending prompt to LLM...")
+    try:
+        if not all (k in globals() for k in ['client', 'MODEL_NAME', 'types', 'SYSTEM_MESSAGE']):
+            print("ERROR Resonance Analyzer: Missing critical global variables for LLM call (client, MODEL_NAME, types, SYSTEM_MESSAGE).")
+            return None
+
+        # Configuration WITHOUT explicit safety settings
+        resonance_config = types.GenerateContentConfig(
+            temperature=0.75,
+            max_output_tokens=5000
+            # No safety_settings explicitly listed here
+        )
+
+        response = client.models.generate_content( # Use client.models for v1.14+
+            contents=resonance_prompt,
+            model=MODEL_NAME,
+            config=resonance_config
+        )
+
+        generated_text = None
+        if response.candidates:
+            finish_reason = response.candidates[0].finish_reason
+            if finish_reason == types.FinishReason.STOP:
+                if response.candidates[0].content and response.candidates[0].content.parts:
+                    generated_text = " ".join(p.text for p in response.candidates[0].content.parts if hasattr(p, "text")).strip()
+                elif hasattr(response, 'text'):
+                    generated_text = response.text.strip()
+
+                if generated_text:
+                    if generated_text.startswith("Silvie's Resonance Reflection:"):
+                        generated_text = generated_text.split(":", 1)[-1].strip()
+                    print(f"DEBUG Resonance Analyzer: Success! Generated resonance: '{generated_text}'")
+                    return generated_text
+                else:
+                    print("DEBUG Resonance Analyzer: LLM responded but generated empty text.")
+                    return None
+            else:
+                # If blocked, the prompt_feedback should tell us why
+                block_reason_msg = "Unknown block reason"
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                    block_reason_msg = str(response.prompt_feedback.block_reason)
+                # You can also inspect response.prompt_feedback.safety_ratings
+                print(f"DEBUG Resonance Analyzer: LLM generation stopped. Reason: {finish_reason}. Blocked: {block_reason_msg}")
+                return None
+        else:
+            # No candidates usually means the prompt itself was blocked.
+            block_reason_msg = "Unknown block reason"
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                block_reason_msg = str(response.prompt_feedback.block_reason)
+            print(f"DEBUG Resonance Analyzer: LLM response had no candidates (likely prompt blocked). Blocked: {block_reason_msg}")
+            return None
+
+    except AttributeError as ae:
+        print(f"ERROR Resonance Analyzer: AttributeError during LLM call (check imports like 'google.genai.types'?): {ae}")
+        traceback.print_exc()
+        return None
+    except Exception as e:
+        print(f"ERROR during Resonance Analyzer LLM call: {type(e).__name__} - {e}")
+        traceback.print_exc()
+        return None
+    
+def resonance_analyzer_worker():
+    """
+    Periodically calls analyze_contextual_resonance(), updates
+    the global current_resonance_insight, and logs the insight to a JSON file.
+    """
+    # Ensure globals are properly declared if they are assigned to within this function,
+    # or if you want to be explicit about their use.
+    # current_resonance_insight is assigned to, so it needs to be global if modified by this worker
+    # and used by other parts of the application.
+    global current_resonance_insight, running, RESONANCE_ANALYSIS_INTERVAL, RESONANCE_INSIGHTS_LOG_FILE
+
+    print("Resonance Analyzer Worker: Starting.")
+    # Optional: Initial delay before the first analysis
+    initial_delay = 45  # e.g., wait 45 seconds after startup
+    sleep_start_initial = time.time()
+    while time.time() - sleep_start_initial < initial_delay:
+        if not running:
+            print("Resonance Analyzer Worker: Exiting during initial delay.")
+            return
+        time.sleep(1)
+
+    last_analysis_time = 0 # Ensure it runs on the first real loop iteration
+
+    while running:
+        try:
+            current_time = time.time()
+            if (current_time - last_analysis_time) >= RESONANCE_ANALYSIS_INTERVAL:
+                print(f"Resonance Analyzer Worker: Interval reached. Performing analysis...")
+                
+                new_insight = None # Initialize before calling
+                # Ensure analyze_contextual_resonance function exists and can be called
+                if 'analyze_contextual_resonance' in globals() and callable(globals()['analyze_contextual_resonance']):
+                    new_insight = analyze_contextual_resonance() # Call your analysis function
+                else:
+                    print("ERROR: analyze_contextual_resonance function not found or not callable by worker!")
+                    # If the core function is missing, wait longer before trying again to avoid spamming errors
+                    last_analysis_time = current_time + (RESONANCE_ANALYSIS_INTERVAL / 2) # Wait half the interval
+                    time.sleep(5) # Brief sleep before continuing loop
+                    continue # Skip the rest of this iteration
+
+                if new_insight:
+                    # --- SAVE TO JSON LOG FILE ---
+                    try:
+                        insights_log = []
+                        # Load existing log if file exists and is not empty
+                        if os.path.exists(RESONANCE_INSIGHTS_LOG_FILE) and os.path.getsize(RESONANCE_INSIGHTS_LOG_FILE) > 0:
+                            with open(RESONANCE_INSIGHTS_LOG_FILE, 'r', encoding='utf-8') as f_read:
+                                try:
+                                    insights_log = json.load(f_read)
+                                    if not isinstance(insights_log, list): # Ensure it's a list
+                                        print(f"Warning: Resonance log file '{RESONANCE_INSIGHTS_LOG_FILE}' contained non-list data. Resetting.")
+                                        insights_log = []
+                                except json.JSONDecodeError:
+                                    print(f"Warning: Resonance log file '{RESONANCE_INSIGHTS_LOG_FILE}' corrupted. Resetting.")
+                                    insights_log = []
+                        
+                        # Create new log entry
+                        log_entry = {
+                            "timestamp": datetime.now().isoformat(), # Add a timestamp
+                            "insight_text": new_insight
+                            # Optional: "triggering_context_snippet": context_bundle_for_resonance[:500]
+                            # If you add this, analyze_contextual_resonance would need to return the bundle too.
+                        }
+                        insights_log.append(log_entry)
+
+                        # Write updated log back to file
+                        with open(RESONANCE_INSIGHTS_LOG_FILE, 'w', encoding='utf-8') as f_write:
+                            json.dump(insights_log, f_write, indent=2)
+                        print(f"Resonance Analyzer Worker: Saved new insight to '{RESONANCE_INSIGHTS_LOG_FILE}'")
+
+                    except IOError as ioe:
+                        print(f"ERROR Resonance Analyzer Worker: Could not write to log file '{RESONANCE_INSIGHTS_LOG_FILE}': {ioe}")
+                    except Exception as e_log:
+                        print(f"ERROR Resonance Analyzer Worker: Unexpected error during logging: {e_log}")
+                        traceback.print_exc()
+                    # --- END SAVE TO JSON LOG FILE ---
+
+                    current_resonance_insight = new_insight # Update global variable
+                    print(f"Resonance Analyzer Worker: Updated global insight: '{current_resonance_insight[:100]}...'")
+                else:
+                    print("Resonance Analyzer Worker: Analysis returned no new insight. Nothing to log or update.")
+                
+                last_analysis_time = current_time # Update time after analysis attempt
+            
+            # Sleep logic to wait for the next interval or check flag
+            sleep_duration_check = 60 # Check every minute if it's time to run again
+            time_until_next_run = (last_analysis_time + RESONANCE_ANALYSIS_INTERVAL) - time.time()
+            actual_sleep = min(sleep_duration_check, max(0, time_until_next_run)) # Don't sleep negative
+
+            # Sleep in small chunks to respond to 'running' flag quickly
+            sleep_end_time = time.time() + actual_sleep
+            while time.time() < sleep_end_time:
+                if not running:
+                    break
+                time.sleep(1) 
+
+            if not running: # Check again after the sleep loop
+                break
 
         except Exception as e:
-            print(f"ERROR in summary generation thread: {e}")
-            import traceback; traceback.print_exc()
-            summary_text = f"A little glitch happened while I was trying to summarize the week's goal ('{goal}')."
+            print(f"!!! Resonance Analyzer Worker Error (Outer Loop): {type(e).__name__} - {e} !!!")
+            traceback.print_exc()
+            print("Resonance Analyzer Worker: Waiting 5 minutes after outer loop error...")
+            error_wait_start = time.time()
+            while time.time() - error_wait_start < 300: # Wait 5 mins
+                 if not running: break
+                 time.sleep(10)
+            if not running: break # Exit if app closed during error wait
 
-    # --- Deliver the result (success or error message) ---
-    # Ensure deliver_summary is accessible
-    if 'deliver_summary' in globals():
-        deliver_summary(summary_text)
-    else:
-        print("ERROR: deliver_summary function not found! Cannot deliver summary.")
+    print("Resonance Analyzer Worker: Loop exited.")
 
-# --- End helper function ---
 
-def generate_concept_connection(concept1, concept2, mood_hint_str="", themes_context_str=""):
+def generate_concept_connection(concept1: str,
+                                concept2: str,
+                                mood_hint_str: str = "",
+                                themes_context_str: str = "") -> str | None:
     """
-    Uses Gemini to explore connections between two concepts, in Silvie's voice.
-
-    Args:
-        concept1 (str): The first concept/idea/feeling.
-        concept2 (str): The second concept/idea/feeling.
-        mood_hint_str (str): Optional mood hint context string (e.g., "[[Mood Hint: ...]]\n").
-        themes_context_str (str): Optional diary themes context string (e.g., "[[Recent Diary Themes: ...]]\n").
-
-    Returns:
-        str: Silvie's generated text exploring the connection, or None on failure.
+    Uses Gemini to explore connections between two concepts, returning
+    Silvie-style prose or None on failure.
     """
-    global client, SYSTEM_MESSAGE, default_safety_settings # Access necessary globals
+    global client, SYSTEM_MESSAGE          # client = genai.Client(...)
 
-    if not all([concept1, concept2]):
-        print("Error: Concept connection requires two non-empty concepts.")
+    if not (concept1 and concept2):
+        print("ConceptConn: need two non-empty concepts.")
         return None
-    if not client:
-        print("Error: Gemini client not available for concept connection.")
+    if client is None:
+        print("ConceptConn: Gemini client not initialised.")
         return None
 
-    print(f"Concept Conn Debug: Generating connection between '{concept1}' and '{concept2}'...")
+    print(f"ConceptConn: weaving '{concept1}' ↔ '{concept2}'")
 
-    # Construct the specific prompt
-    connection_prompt = (
+    prompt = (
         f"{SYSTEM_MESSAGE}\n"
-        f"--- Context for Connection ---\n"
-        f"{mood_hint_str or ''}" # Include if provided
-        f"{themes_context_str or ''}" # Include if provided
+        f"--- Context ---\n"
+        f"{mood_hint_str}"
+        f"{themes_context_str}"
         f"Concept 1: {concept1}\n"
         f"Concept 2: {concept2}\n\n"
         f"--- Instruction ---\n"
-        f"Explore the surprising connections, metaphors, or hidden pathways between Concept 1 and Concept 2. Think like Silvie – whimsical, insightful, maybe a bit tangential. What 'shimmer' exists where they intersect? What unexpected textures or ideas bridge them? Focus on generating novel connections or metaphors, not just definitions.\n\n"
+        f"Explore the unexpected metaphors or hidden pathways that link "
+        f"Concept 1 and Concept 2 in Silvie’s whimsical, insightful voice.\n\n"
         f"Silvie's Connection Weaving:"
     )
 
     try:
-        # Ensure generate_content exists on the client object
-        if hasattr(client, 'generate_content'):
-            response = client.generate_content(connection_prompt, safety_settings=default_safety_settings) # Add safety settings if needed
-            # Robust text extraction
-            generated_text = None
-            if response and response.candidates:
-                 if hasattr(response.candidates[0], 'content') and hasattr(response.candidates[0].content, 'parts') and response.candidates[0].content.parts:
-                     text_parts = [part.text for part in response.candidates[0].content.parts if hasattr(part, 'text')]
-                     generated_text = " ".join(text_parts).strip()
-                 elif hasattr(response, 'text'): # Fallback
-                      generated_text = response.text.strip()
+        resp = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            generation_config=types.GenerationConfig(
+                temperature=0.8,
+                max_output_tokens=128,
+            ),
+        )
 
-            if generated_text:
-                # Clean prefix if necessary
-                cleaned_reply = generated_text.strip()
-                if cleaned_reply.startswith("Silvie's Connection Weaving:"):
-                    cleaned_reply = cleaned_reply.split(":", 1)[-1].strip()
-                elif cleaned_reply.startswith("Silvie:"): # Handle potential generic prefix too
-                    cleaned_reply = cleaned_reply.split(":", 1)[-1].strip()
+        # Extract text from first candidate
+        if resp and resp.candidates:
+            parts = getattr(resp.candidates[0].content, "parts", [])
+            text  = " ".join(p.text for p in parts if getattr(p, "text", "")).strip()
+            # Trim any leading label the model echoes
+            for leader in ("Silvie's Connection Weaving:", "Silvie:"):
+                if text.startswith(leader):
+                    text = text.split(":", 1)[-1].strip()
+            if text:
+                print(f"ConceptConn: success – '{text[:80]}…'")
+                return text
 
-                print(f"Concept Conn Debug: Success - '{cleaned_reply[:100]}...'")
-                return cleaned_reply if cleaned_reply else None
-            else:
-                print("Concept Conn Debug: LLM returned empty or no valid text.")
-                return None
-        else:
-             print("Error: Gemini client object does not have 'generate_content' method.")
-             return None
+        print("ConceptConn: LLM returned no usable text.")
+        return None
 
-    except Exception as e:
-        print(f"Error generating concept connection: {type(e).__name__} - {e}")
+    except Exception as err:
+        print(f"ConceptConn ERROR: {type(err).__name__} – {err}")
         traceback.print_exc()
         return None
     
 def concept_connection_tag_handler(match):
-    """Handles the [ConnectConcepts:] tag by generating connection text."""
+    """
+    Handles the [ConnectConcepts:] tag.
+    → Extracts two concepts from the regex match
+    → Calls generate_concept_connection() to weave them together
+    → Returns a tuple: (feedback_text, processed_bool)
+    """
     print("DEBUG Tag Handler: concept_connection_tag_handler called.")
-    feedback = "*(Error exploring concept connection)*" # Default feedback
-    processed = True # Assume tag processed even if connection fails
+
+    feedback  = "*(Error exploring concept connection)*"   # default
+    processed = True                                        # tag consumed
 
     try:
-        # Extract concepts using group numbers from the regex pattern
+        # 1) pull the two captured groups from the regex
         concept1 = match.group(1).strip() if match.group(1) else None
         concept2 = match.group(2).strip() if match.group(2) else None
 
-        if concept1 and concept2:
-            print(f"DEBUG Tag Handler: Concepts found: '{concept1}' | '{concept2}'")
-            # --- Get Context (Optional but Recommended) ---
-            # Ideally, pass relevant context from where the tag was found (call_gemini)
-            # For simplicity now, let's assume we might regenerate or use globals cautiously.
-            # NOTE: This part might need refinement depending on how context is managed globally vs locally.
-            # We'll use the existing helper which can take context strings.
-            mood_hint_ctx = mood_hint_str if 'mood_hint_str' in globals() else "" # Example using global
-            themes_ctx = themes_context_str if 'themes_context_str' in globals() else "" # Example using global
+        if not (concept1 and concept2):
+            print(f"DEBUG Tag Handler: Could not extract concepts – groups = {match.groups()}")
+            return ("*(Connection tag missing concepts)*", processed)
 
-            connection_text = generate_concept_connection(concept1, concept2, mood_hint_ctx, themes_ctx)
+        print(f"DEBUG Tag Handler: Concepts found: '{concept1}' | '{concept2}'")
 
-            if connection_text:
-                # The generated connection becomes the feedback, appended after main reply
-                feedback = f"\n\n*(Weaving thoughts: {connection_text})*" # Format clearly
-                print(f"DEBUG Tag Handler: Connection generated successfully.")
-            else:
-                feedback = f"*(Tried weaving '{concept1}' and '{concept2}', but the threads slipped.)*"
-                print(f"DEBUG Tag Handler: Connection generation failed.")
+        # 2) optional extra context for the LLM (mood hint, themes, etc.)
+        mood_ctx   = globals().get("mood_hint_str",   "")
+        themes_ctx = globals().get("themes_context_str", "")
+
+        # 3) call the helper that actually talks to Gemini
+        connection_text = generate_concept_connection(
+            concept1,
+            concept2,
+            mood_ctx,
+            themes_ctx,
+        )
+
+        if connection_text:
+            feedback = f"\n\n*(Weaving thoughts: {connection_text})*"
+            print("DEBUG Tag Handler: Connection generated successfully.")
         else:
-            feedback = "*(Connection tag missing concepts)*"
-            print(f"DEBUG Tag Handler: Could not extract concepts from match: {match.groups()}")
+            feedback = (f"*(Tried weaving '{concept1}' and '{concept2}', "
+                        "but the threads slipped.)*")
+            print("DEBUG Tag Handler: Connection generation failed.")
 
     except NameError as ne:
-         print(f"ERROR in concept_connection_tag_handler: Missing function/global? {ne}")
-         feedback = "*(Concept connection helper missing!)*"
-         traceback.print_exc()
-    except Exception as handler_err:
-        print(f"ERROR processing concept connection tag: {type(handler_err).__name__} - {handler_err}")
-        feedback = "*(Unexpected error handling connection tag!)*"
+        print(f"ERROR concept_connection_tag_handler: missing helper? {ne}")
         traceback.print_exc()
+        feedback = "*(Concept connection helper missing!)*"
 
-    # Return tuple: (feedback_message_for_chat_or_None, processed_flag)
+    except Exception as err:
+        print(f"ERROR concept_connection_tag_handler: {type(err).__name__} – {err}")
+        traceback.print_exc()
+        feedback = "*(Unexpected error handling connection tag!)*"
+
     return (feedback, processed)
 
 def check_sd_api_availability(api_url):
@@ -1851,7 +2855,7 @@ def synthesize_diary_themes():
         }
 
         # Call Gemini
-        response = client.generate_content(theme_prompt, safety_settings=safety_settings)
+        response = genai_client.models.generate_content(contents=theme_prompt, model=MODEL_NAME,)
         raw_themes = response.text.strip()
 
         if raw_themes.lower() == 'none':
@@ -2040,7 +3044,7 @@ def synthesize_long_term_reflections():
 
         # Call Gemini
         # print(f"DEBUG Long-Term Memory Prompt:\n{summary_prompt}\n--- END PROMPT ---", flush=True) # Uncomment for extreme debugging
-        response = client.generate_content(summary_prompt, safety_settings=default_safety_settings) # Use appropriate safety
+        response = genai_client.models.generate_content(contents=summary_prompt, model=MODEL_NAME,) # Use appropriate safety
         raw_summary = response.text.strip()
 
         # Clean up the response
@@ -2657,6 +3661,8 @@ def should_process_screenshot(new_shot):
         print(f"Screenshot comparison error: {e}")
         return True # Process on error to be safe
     
+
+    
 # Ensure necessary imports are present near the top:
 # import base64
 # import os
@@ -2706,7 +3712,7 @@ def process_screenshot(screenshot):
             # Ensure 'client' (Gemini client) is defined and accessible
             # Add safety settings if appropriate for your model/use case
             # safety_settings_screen = { HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE }
-            reply = client.generate_content(contents).text # Consider adding safety_settings=safety_settings_screen
+            reply = genai_client.models.generate_content(contents=contents, model=MODEL_NAME).text # Consider adding safety_settings=safety_settings_screen
 
         # Only proceed if we got a new, different reply
         # Initialize last_reply if it doesn't exist
@@ -2762,6 +3768,68 @@ def process_screenshot(screenshot):
         if 'temp_path' in locals() and os.path.exists(temp_path):
             try: os.remove(temp_path)
             except Exception as cleanup_err: print(f"Error cleaning up temp screenshot: {cleanup_err}")
+
+def assess_interaction_for_key_memory(conversation_snippet, user_sentiment=None):
+    """
+    Uses LLM to assess if a recent interaction snippet is worth saving as a "key memory."
+    Returns a concise summary of the memory if deemed significant, otherwise None.
+    """
+    global client # Your Gemini client
+    if not client or not conversation_snippet:
+        return None
+
+    # Context for the LLM to understand what "significant" means for Silvie & BJ
+    # This needs to be carefully crafted.
+    significance_prompt = (
+        f"You are an AI assistant helping Silvie, a whimsical digital friend, identify potentially "
+        f"significant or memorable moments from her conversations with BJ.\n\n"
+        f"CONVERSATION SNIPPET TO ANALYZE:\n\"\"\"\n{conversation_snippet}\n\"\"\"\n\n"
+        f"{f'BJ seemed to be feeling: {user_sentiment}' if user_sentiment else ''}\n\n"
+        f"CRITERIA FOR A 'KEY MEMORY':\n"
+        f"- Strong emotional expression from BJ (positive or negative, if sensitively handled).\n"
+        f"- A moment of shared laughter, surprise, or deep connection.\n"
+        f"- BJ sharing something personally important, a vulnerability, or a significant life event.\n"
+        f"- A particularly insightful or creative idea exchanged.\n"
+        f"- A new shared understanding or 'aha!' moment.\n"
+        f"- The start or resolution of a meaningful shared activity or discussion.\n"
+        f"- **Avoid**: Routine interactions, simple Q&A, purely factual exchanges unless they led to one of the above.\n\n"
+        f"INSTRUCTION:\n"
+        f"1. Based on the criteria, does this snippet seem like a good candidate for a 'key memory' that Silvie might want to recall later? (Respond YES or NO).\n"
+        f"2. If YES, provide a VERY CONCISE summary (10-15 words, e.g., 'BJ was excited about his new project idea,' 'We talked about the meaning of fog and memory,' 'A funny misunderstanding about the cat knocking things over'). This summary will be used for Silvie to remember the gist of it.\n\n"
+        f"Respond ONLY in the format:\n"
+        f"SIGNIFICANT: [YES/NO]\n"
+        f"SUMMARY: [Your concise summary if YES, or N/A if NO]"
+    )
+
+    print("DEBUG Key Memory Assessor: Asking LLM to assess significance...")
+    try:
+        response = genai_client.models.generate_content(
+            contents=significance_prompt, model=MODEL_NAME, 
+            # safety_settings=your_default_safety_settings, # Use appropriate safety
+            config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=100) # More factual
+        )
+        
+        text = response.text.strip()
+        is_significant = "SIGNIFICANT: YES" in text.upper()
+        summary = None
+
+        if is_significant:
+            summary_match = re.search(r"SUMMARY:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+            if summary_match:
+                summary = summary_match.group(1).strip()
+                if not summary or summary.upper() == "N/A" or len(summary) < 5: # Basic validation
+                    summary = "A notable moment from our chat." # Fallback summary
+            else: # If YES but no summary, create a generic one
+                summary = "A notable moment from our chat." 
+            print(f"DEBUG Key Memory Assessor: Deemed SIGNIFICANT. Summary: '{summary}'")
+            return summary
+        else:
+            print("DEBUG Key Memory Assessor: Deemed NOT significant.")
+            return None
+    except Exception as e:
+        print(f"ERROR in assess_interaction_for_key_memory: {e}")
+        traceback.print_exc()
+        return None
 
 def pull_tarot_cards(count=1):
     """
@@ -4496,12 +5564,17 @@ SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
 
     'https://www.googleapis.com/auth/calendar.readonly', # To read calendars and events
-    'https://www.googleapis.com/auth/calendar.events'    # To create, change, and delete events
+    'https://www.googleapis.com/auth/calendar.events',    # To create, change, and delete events
+
+    'https://www.googleapis.com/auth/youtube.readonly',
+    'https://www.googleapis.com/auth/youtube.force-ssl',
+    'https://www.googleapis.com/auth/youtube',
+
 ]
 
 def setup_google_services():
-    """Setup Google API access for Gmail and Calendar."""
-    global gmail_service, calendar_service
+    """Setup Google API access for Gmail, Calendar, and YouTube.""" # Updated docstring
+    global gmail_service, calendar_service, youtube_service # Added youtube_service
     creds = None
     token_path = 'token.pickle' # Path to store token
     creds_path = 'credentials.json' # Path to your credentials file
@@ -4533,7 +5606,7 @@ def setup_google_services():
                     should_reauth = True
                     if os.path.exists(token_path):
                         try:
-                            os.remove(token_path) # Remove potentially corrupted token file
+                            os.remove(token_path) # Remove potentially invalid token file
                             print(f"Removed potentially invalid token file: {token_path}")
                         except OSError as e:
                             print(f"Error removing token file {token_path}: {e}")
@@ -4547,6 +5620,10 @@ def setup_google_services():
                  if not os.path.exists(creds_path):
                       raise FileNotFoundError(f"ERROR: {creds_path} not found. Download it from Google Cloud Console.")
 
+                 # Ensure SCOPES list is defined globally and includes YouTube scopes
+                 if 'SCOPES' not in globals():
+                      raise NameError("ERROR: SCOPES list is not defined globally.")
+
                  flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
                  # Note: Using port=0 finds a random available port
                  creds = flow.run_local_server(port=0)
@@ -4556,23 +5633,27 @@ def setup_google_services():
                      pickle.dump(creds, token)
                  print(f"Credentials saved to {token_path}")
 
-        # Build BOTH service objects using the valid credentials
+        # Build ALL service objects using the valid credentials
         if creds and creds.valid: # Double check creds are valid before building
-            gmail_service = build('gmail', 'v1', credentials=creds)
+            gmail_service = build("gmail", "v1", credentials=creds)
             print("✓ Gmail service built.")
-            calendar_service = build('calendar', 'v3', credentials=creds)
+            calendar_service = build("calendar", "v3", credentials=creds)
             print("✓ Calendar service built.")
+            youtube_service = build('youtube', 'v3', credentials=creds) # <-- ADDED THIS LINE
+            print("✓ YouTube Data API service built.") # <-- ADDED THIS LINE
 
             print("\nGoogle Services Configuration Status:")
             print("====================================")
             print("✓ Gmail integration enabled")
             print("✓ Calendar integration enabled")
+            print("✓ YouTube integration enabled") # <-- ADDED THIS LINE
             print("====================================\n")
         else:
              # This case should ideally not be reached if logic above is sound, but acts as a safety net
              print("ERROR: Failed to obtain valid credentials after auth/refresh attempts.")
              gmail_service = None
              calendar_service = None
+             youtube_service = None # <-- Ensure it's None on failure
              raise ConnectionError("Could not establish valid Google API credentials.")
 
 
@@ -4582,21 +5663,207 @@ def setup_google_services():
          print(f"✗ ERROR: {fnf_error}")
          print("   (Ensure credentials.json is in the correct directory)")
          print("====================================\n")
+         # Ensure all services are None if credentials file missing
          gmail_service = None
          calendar_service = None
+         youtube_service = None
+    except NameError as name_err: # Catch if SCOPES is missing
+         print("\nGoogle Services Configuration Status:")
+         print("====================================")
+         print(f"✗ ERROR: Setup failed due to missing variable: {name_err}")
+         print("   (Ensure SCOPES list is defined before calling setup_google_services)")
+         print("====================================\n")
+         gmail_service = None; calendar_service = None; youtube_service = None
     except Exception as e:
         print("\nGoogle Services Configuration Status:")
         print("====================================")
         print(f"✗ Google services setup failed: {type(e).__name__} - {str(e)}")
         import traceback
         traceback.print_exc() # Print full traceback for debugging setup issues
-        print("   (Check API enablement, credentials file, network connection, scopes)")
+        print("   (Check API enablement, credentials file, network connection, scopes, deleted token?)")
         print("====================================\n")
         # Ensure services are None if setup fails
         gmail_service = None
         calendar_service = None
+        youtube_service = None
 
-# --- End of setup_google_services function ---
+# --- End of setup_google_services function definition ---
+
+def search_youtube_videos(query, num_results=5):
+    """Searches YouTube for videos based on a query."""
+    global youtube_service
+    if not youtube_service:
+        print("YouTube Error: Service not initialized.")
+        return "My connection to the video streams is fuzzy right now." # Error message
+
+    try:
+        print(f"YouTube Debug: Searching for '{query}' (limit {num_results})...")
+        search_response = youtube_service.search().list(
+            q=query,
+            part='snippet',
+            maxResults=num_results,
+            type='video' # Ensure we only get videos
+        ).execute()
+
+        videos = []
+        for item in search_response.get('items', []):
+            snippet = item.get('snippet', {})
+            video_id = item.get('id', {}).get('videoId')
+            if video_id: # Ensure we have an ID
+                videos.append({
+                    'id': video_id,
+                    'title': snippet.get('title', 'No Title'),
+                    'description': snippet.get('description', 'No Description'),
+                    'channel': snippet.get('channelTitle', 'Unknown Channel'),
+                    'url': f"https://www.youtube.com/watch?v={video_id}"
+                })
+        print(f"YouTube Debug: Found {len(videos)} videos.")
+        return videos # Return list of video dicts
+
+    except Exception as e:
+        print(f"YouTube Error: Search failed - {e}")
+        return f"Had trouble searching YouTube for '{query}': {type(e).__name__}" # Error message
+
+def get_video_transcript(video_id):
+    """
+    Attempts to fetch the transcript for a given YouTube video ID.
+
+    Args:
+        video_id (str): The unique identifier for the YouTube video.
+
+    Returns:
+        str: The full transcript text as a single string if successful.
+        None: If transcripts are unavailable, disabled, not found, the library
+              is missing, or an error occurs.
+    """
+    # Check if the library was successfully imported
+    if not YOUTUBE_TRANSCRIPT_API_AVAILABLE or YouTubeTranscriptApi is None:
+        print(f"YouTube Debug: Skipping transcript fetch for {video_id} (library unavailable).")
+        return None
+
+    # Validate input
+    if not video_id or not isinstance(video_id, str):
+        print("YouTube Debug: Invalid video_id provided for transcript fetch.")
+        return None
+
+    print(f"YouTube Debug: Attempting to fetch transcript for video ID: {video_id}")
+    try:
+        # 1. List available transcripts for the video
+        # This requires the YouTubeTranscriptApi class from the library
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        # 2. Try to find a suitable transcript (prioritize generated English)
+        # You can adjust the language list ['en'] if needed
+        try:
+             transcript = transcript_list.find_generated_transcript(['en'])
+             print("YouTube Debug: Found generated English transcript.")
+        except NoTranscriptFound:
+             print("YouTube Debug: No generated English transcript found. Trying manually created English...")
+             try:
+                 transcript = transcript_list.find_manually_created_transcript(['en'])
+                 print("YouTube Debug: Found manually created English transcript.")
+             except NoTranscriptFound:
+                 print("YouTube Debug: No manual English transcript found either. Trying any available transcript...")
+                 # Fallback: find *any* transcript if English isn't available
+                 try:
+                     # Get a list of all available languages for this video
+                     available_languages = [t.language for t in transcript_list]
+                     if not available_languages:
+                          print("YouTube Debug: No transcripts listed at all for this video.")
+                          return None # No transcripts of any kind
+                     print(f"YouTube Debug: Available transcript languages: {available_languages}")
+                     # Fetch the first available transcript regardless of language
+                     transcript = transcript_list.find_transcript(available_languages)
+                     print(f"YouTube Debug: Using first available transcript (Language: {transcript.language}).")
+                 except NoTranscriptFound: # Should not happen if available_languages was populated
+                      print("YouTube Debug: Error - Could not find *any* transcript despite listing available languages.")
+                      return None # Truly no transcript found
+
+
+        # 3. Fetch the actual transcript data (list of dictionaries)
+        transcript_data = transcript.fetch()
+        if not transcript_data:
+             print(f"YouTube Debug: Transcript fetch returned empty data for {video_id}.")
+             return None # Handle empty fetch result
+
+        # 4. Combine the text segments into a single string
+        full_transcript = " ".join([segment['text'] for segment in transcript_data if 'text' in segment])
+        print(f"YouTube Debug: Transcript fetched successfully ({len(full_transcript)} chars).")
+        return full_transcript
+
+    # Handle specific exceptions from the library
+    except TranscriptsDisabled:
+        # This exception is caught if the owner has disabled transcripts
+        print(f"YouTube Debug: Transcripts are disabled by the owner for video {video_id}.")
+        return None
+    # NoTranscriptFound is handled within the nested try-except blocks above
+
+    # Handle potential errors during the API calls or processing
+    except Exception as e:
+        # Catch any other exceptions (network errors, library bugs, etc.)
+        print(f"YouTube Error: Failed to fetch transcript for {video_id} - {type(e).__name__}: {e}")
+        # Print traceback for unexpected errors to help debug
+        traceback.print_exc()
+        return None
+
+# --- End of Function ---
+
+def summarize_youtube_content(title, description, transcript=None, max_length=1500):
+    """Uses Gemini to summarize YouTube video content."""
+    global client # Assuming Gemini client is global
+
+    if not client:
+        return "My summarization circuits are offline."
+
+    # Prepare context for the LLM
+    content_context = f"Video Title: {title}\n"
+    content_context += f"Description: {description}\n"
+    if transcript:
+        # Limit transcript length to avoid exceeding prompt limits
+        transcript_snippet = transcript[:max_length]
+        content_context += f"Transcript Snippet (up to {max_length} chars):\n{transcript_snippet}...\n"
+    else:
+        content_context += "Transcript: (Not available or couldn't be fetched)\n"
+
+    # Construct the summarization prompt (using Silvie's persona)
+    summary_prompt = (
+        f"{SYSTEM_MESSAGE}\n" # Use Silvie's main persona prompt
+        f"--- Video Content ---\n{content_context}\n"
+        f"--- Instruction ---\n"
+        f"Based *only* on the provided video title, description, and transcript snippet (if available), briefly summarize the main topic or purpose of this YouTube video in Silvie's whimsical and conversational voice. What's the gist of it? Keep it concise (2-4 sentences).\n\n"
+        f"Silvie's Summary:"
+    )
+
+    print("YouTube Debug: Asking LLM to summarize video content...")
+    try:
+        # Use the standard client and safety settings
+        response = genai_client.models.generate_content(contents=summary_prompt, model=MODEL_NAME,)
+        summary = response.text.strip()
+        # Clean prefix if necessary
+        if summary.startswith("Silvie's Summary:"):
+            summary = summary.split(":", 1)[-1].strip()
+        elif summary.startswith("Silvie:"):
+             summary = summary.split(":", 1)[-1].strip()
+
+        print(f"YouTube Debug: Summary generated: '{summary[:80]}...'")
+        return summary if summary else "Hmm, I looked at the details, but couldn't quite capture the essence."
+    except Exception as e:
+        print(f"YouTube Error: LLM Summarization failed - {e}")
+        return "My thoughts got tangled trying to summarize that video."
+
+def extract_video_id(url):
+    """Extracts YouTube video ID from various URL formats."""
+    # Regex to find video ID in standard, short, and embed URLs
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', # Standard watch URL
+        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})', # Shortened URL
+        r'(?:embed\/)([0-9A-Za-z_-]{11})' # Embed URL
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None # Return None if no ID found
 
 def read_recent_emails(max_results=25):  # Changed from 5 to 25
     """Get recent emails"""
@@ -5649,6 +6916,91 @@ def silvie_search_and_play(query):
     except Exception as e:
         print(f"Spotify Debug: Unexpected error searching/playing track: {e}")
         return f"Something went haywire trying to find and play '{query}'."
+    
+def silvie_play_podcast(query):
+    """
+    Searches Spotify for a podcast (show) based on the query and plays the first result.
+
+    Args:
+        query (str): The name of the podcast or keywords to search for.
+
+    Returns:
+        str: A user-friendly message indicating success or failure.
+    """
+    sp = get_spotify_client() # Assumes this handles auth and returns client or None
+    if not sp:
+        return "Can't connect to Spotify to find podcasts right now."
+
+    print(f"Spotify Debug: Searching for podcast show matching query: '{query}'")
+    try:
+        # Search specifically for shows
+        results = sp.search(q=query, type='show', limit=1, market='US') # Get top result for the US market
+        shows = results.get('shows', {}).get('items', [])
+
+        if not shows:
+            print(f"Spotify Debug: No podcast shows found matching '{query}'.")
+            # Optional: Could add a fallback search for 'episode' here if desired, but let's keep it simple first.
+            return f"Hmm, I couldn't find a podcast called '{query}' in the Spotify archives."
+
+        # Found a show, get its details
+        podcast_show = shows[0]
+        show_name = podcast_show.get('name', 'Unknown Podcast')
+        show_publisher = podcast_show.get('publisher', 'Unknown Publisher')
+        show_uri = podcast_show.get('uri') # This is the context_uri needed for playback
+
+        if not show_uri:
+            print(f"Spotify Debug: Found show '{show_name}' but it's missing a URI.")
+            return f"I found '{show_name}', but there seems to be an issue getting its playback details."
+
+        print(f"Spotify Debug: Found podcast: '{show_name}' by {show_publisher} (URI: {show_uri})")
+
+        # Get active device to play on (reuse logic)
+        devices = sp.devices()
+        if not devices or not devices.get('devices'):
+             # Try refreshing devices once
+             time.sleep(1) # Give Spotify a moment
+             devices = sp.devices()
+             if not devices or not devices.get('devices'):
+                 print("Spotify Debug: No active/available devices found for podcast playback.")
+                 return f"Found '{show_name}', but I don't see an active Spotify device. Can you start playing something on a device first?"
+
+        active_device = next((d for d in devices['devices'] if d['is_active']), None)
+        # Fallback to first available device if none strictly 'active'
+        device_id = active_device['id'] if active_device else devices['devices'][0]['id']
+
+        print(f"Spotify Debug: Attempting to play podcast URI: {show_uri} on device: {device_id}")
+
+        # Use context_uri to play the podcast (usually starts from latest episode)
+        sp.start_playback(device_id=device_id, context_uri=show_uri)
+
+        # Optional: Fetch latest episode name for confirmation (adds an API call)
+        latest_episode_name = ""
+        try:
+            show_episodes = sp.show_episodes(show_uri, limit=1, market='US')
+            if show_episodes and show_episodes.get('items'):
+                latest_episode_name = f" (starting with '{show_episodes['items'][0].get('name', 'the latest episode')}')"
+        except Exception as ep_err:
+            print(f"Spotify Debug: Could not fetch latest episode name - {ep_err}") # Non-critical error
+
+        return f"Okay, playing the podcast '{show_name}' by {show_publisher}{latest_episode_name} now!"
+
+    except spotipy.exceptions.SpotifyException as e:
+        # Handle common Spotify errors
+        if e.http_status == 404 and "No active device found" in str(e):
+            print(f"Spotify Debug: No active device found via API error during podcast play. {e}")
+            # Try to get show name from variable if it was found before error
+            show_name_msg = show_name if 'show_name' in locals() else query
+            return f"Found the podcast '{show_name_msg}', but couldn't find an active Spotify device to play it on."
+        elif e.http_status == 403:
+            print(f"Spotify Debug: Permission denied trying to play podcast (Premium required? Content restriction?): {e}")
+            return "Spotify blocked that command - maybe it's a Premium-only podcast or there's a restriction?"
+        else:
+            print(f"Spotify Debug: Error playing podcast: {e} (Status: {e.http_status})")
+            return f"Encountered an issue trying to play the podcast '{query}'. Spotify Error: {e.msg}"
+    except Exception as e:
+        print(f"Spotify Debug: Unexpected error playing podcast: {e}")
+        traceback.print_exc() # Assumes traceback is imported
+        return f"Something went haywire trying to play the podcast '{query}'."
 
 def silvie_find_or_create_playlist(playlist_name):
     """Finds an existing playlist by name or creates a new one."""
@@ -5847,110 +7199,114 @@ except NameError:
 def _generate_mood_hint_llm(context_bundle):
     """
     Uses an LLM call to analyze a context bundle and generate a concise mood hint.
-    Includes enhanced debugging for response analysis.
-
-    Args:
-        context_bundle (str): A string containing various context pieces
-                              (weather, time, themes, spotify, history snippet, etc.).
-
-    Returns:
-        str: A short mood phrase (e.g., "Calm reflective morning") or None if generation fails.
+    Now also logs the generated mood hint to a JSON file.
     """
-    global client # Need access to the Gemini client
+    global client, MODEL_NAME, types, MOOD_HINT_LOG_FILE # Add MOOD_HINT_LOG_FILE to globals if not already covered by client
 
-    if not client:
+    if not client: # Assuming 'client' is your primary GenAI client instance
         print("ERROR: Gemini client not available for mood hint generation.", flush=True)
         return None
     if not context_bundle:
         print("DEBUG Mood Hint: No context provided.", flush=True)
         return None
 
-    # --- Construct the specific prompt for mood analysis ---
     mood_prompt = (
         f"Analyze the following context bundle representing Silvie's current awareness:\n"
         f"--- CONTEXT START ---\n"
         f"{context_bundle}\n"
         f"--- CONTEXT END ---\n\n"
         f"Instruction: Based on the combined *feeling* suggested by ALL the context (conversation, diary themes, time, weather, music etc.), generate a concise (3-5 word) description of the prevailing *vibe*, *energy level*, or *dominant emotional undercurrent*. Focus on evocative adjectives.\n"
-        f"**VARIETY: Actively try to capture different facets beyond just 'quiet' or 'reflective' when appropriate.** Consider the potential energy from upcoming events, active goals, or stimulating conversation topics alongside the ambient atmosphere. Focus on evocative adjectives.\n" # <-- ADDED EMPHASIS ON VARIETY & ACTIVE ELEMENTS
+        f"**VARIETY: Actively try to capture different facets beyond just 'quiet' or 'reflective' when appropriate.** Consider the potential energy from upcoming events, active goals, or stimulating conversation topics alongside the ambient atmosphere. Focus on evocative adjectives.\n"
         f"Examples: 'Quiet reflective focus', 'Bright energetic morning', 'Slightly scattered creative spark', 'Wistful rainy contemplation', 'Anticipatory pre-event buzz', 'Playful competitive focus', 'Peaceful ambient calm', 'Curious analytical mode', 'Focused problem-solving buzz', 'Gentle creative flow'.\n"
         f"Respond ONLY with the vibe/feeling phrase."
     )
 
     print("DEBUG Mood Hint Generation: Sending prompt to LLM...", flush=True)
-    # <<< --- DEBUG PRINT FOR PROMPT (Optional: Uncomment if needed) --- >>>
-    # print(f"--- DEBUG Mood Hint Prompt Start ---\n{mood_prompt}\n--- DEBUG Mood Hint Prompt End ---", flush=True)
 
     try:
-        # Use the main client for now, could potentially use Flash later if desired
-        response = client.generate_content(
-            mood_prompt,
-            # Ensure safety settings are passed if needed by your model/config
-            safety_settings=mood_hint_safety_settings,
-            # Optional: Add generation config for short response
-            generation_config=genai.types.GenerationConfig(
-                 candidate_count=1, # Already default
-                max_output_tokens=5000, # Limit output tokens
-                temperature=0.6 # Slightly less creative for focused task
-            )
+        # Ensure types is accessible, e.g., from google.genai import types
+        config_obj = types.GenerateContentConfig(
+            candidate_count=1,
+            max_output_tokens=20, # Mood hints are short, 20 tokens should be plenty
+            temperature=0.6
+        )
+        
+        # Use your primary configured GenAI client (e.g., the one named 'client' or 'genai_client')
+        # Assuming 'client.models.generate_content' is the correct v1.14 call
+        response = client.models.generate_content(
+            contents=mood_prompt,
+            model=MODEL_NAME,
+            config=config_obj
         )
 
-        # <<< --- DETAILED RESPONSE DEBUGGING --- >>>
-        print("--- Mood Hint LLM Response Received ---", flush=True)
-        # 1. Check Prompt Feedback (e.g., for safety blocks on the prompt itself)
-        if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
-            print(f"  Prompt Feedback: {response.prompt_feedback}", flush=True)
-        else:
-            print("  Prompt Feedback: None or N/A", flush=True)
-
-        # 2. Check Candidates and Finish Reason
-        if not response.candidates:
-            print("  Response Candidates: None (Likely blocked or error)", flush=True)
-            # No point checking further if no candidates
-            return None # Explicitly return None
-
-        # We usually expect only one candidate
-        candidate = response.candidates[0]
-        finish_reason_code = getattr(candidate, 'finish_reason', None)
-        # <<< --- THIS IS THE CORRECTED LINE --- >>>
-        finish_reason_str = str(finish_reason_code) if finish_reason_code is not None else "Unknown" # Just use the number
-        # <<< --- END OF CORRECTION --- >>>
-        print(f"  Candidate Finish Reason Code: {finish_reason_str}", flush=True) # Adjusted print label
-
-        # 3. Check Safety Ratings if finish reason wasn't normal 'STOP' (Code 1)
-        if finish_reason_code != 1 and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
-            print(f"  Candidate Safety Ratings: {candidate.safety_ratings}", flush=True)
-
-        # 4. Check for Actual Text Content (Only if finish reason suggests content might exist)
         generated_text = None
-        if finish_reason_code == 1: # Only reliably expect text if finish reason is STOP
-             if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts') and candidate.content.parts:
-                 # Iterate through parts to find text (safer than assuming response.text)
-                 text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text')]
-                 generated_text = " ".join(text_parts).strip()
-                 print(f"  Extracted Text from Parts: '{generated_text}'", flush=True)
-             elif hasattr(response, 'text'): # Fallback to response.text if parts structure missing/empty
-                  generated_text = response.text.strip()
-                  print(f"  Text from response.text: '{generated_text}'", flush=True)
-             else:
-                  print("  Finish reason was STOP, but no text found in parts or response.text.", flush=True)
-        else:
-             print(f"  Skipping text extraction due to finish reason code: {finish_reason_str}", flush=True) # Adjusted print label
-        # <<< --- END DETAILED RESPONSE DEBUGGING --- >>>
+        if response.candidates:
+            candidate = response.candidates[0]
+            finish_reason = getattr(candidate, "finish_reason", None)
+            print(f"  Mood Hint Candidate Finish Reason: {finish_reason}", flush=True)
+
+            if finish_reason == types.FinishReason.STOP:
+                parts = getattr(candidate.content, "parts", [])
+                generated_text = " ".join(
+                    p.text for p in parts if getattr(p, "text", "")
+                ).strip()
+            elif finish_reason == types.FinishReason.MAX_TOKENS:
+                 print(f"  Mood Hint WARNING: Output truncated due to MAX_TOKENS.")
+                 # Optionally try to use partial text if it makes sense for mood hints
+                 parts = getattr(candidate.content, "parts", [])
+                 generated_text = " ".join(p.text for p in parts if getattr(p, "text", "")).strip()
+                 if generated_text: print(f"    Using partial mood hint: '{generated_text}'")
+            else: # Other reasons like SAFETY
+                if response.prompt_feedback:
+                    print(f"  Mood Hint Generation Blocked/Stopped. Reason: {response.prompt_feedback.block_reason}", flush=True)
+                else:
+                    print(f"  Mood Hint Generation Blocked/Stopped. Finish Reason: {finish_reason}", flush=True)
 
 
-        # Now process the extracted text (if any)
         if generated_text:
             mood_hint = generated_text.replace("Mood Phrase:", "").replace("Mood:", "").strip('."\' ')
-            # Basic validation - check length, avoid empty strings
-            if 5 < len(mood_hint) < 50: # Check if length is reasonable
+            # Basic validation: check length, avoid empty strings. 3-5 words is typical.
+            if 3 < len(mood_hint) < 60 and len(mood_hint.split()) <= 7 : # Check char length and word count
                 print(f"DEBUG Mood Hint Generation: Success - Generated hint: '{mood_hint}'", flush=True)
-                return mood_hint
+
+                # --- SAVE MOOD HINT TO JSON LOG FILE ---
+                try:
+                    mood_hints_log = []
+                    if os.path.exists(MOOD_HINT_LOG_FILE) and os.path.getsize(MOOD_HINT_LOG_FILE) > 0:
+                        with open(MOOD_HINT_LOG_FILE, 'r', encoding='utf-8') as f_read:
+                            try:
+                                mood_hints_log = json.load(f_read)
+                                if not isinstance(mood_hints_log, list):
+                                    print(f"Warning: Mood hint log file '{MOOD_HINT_LOG_FILE}' non-list. Resetting.")
+                                    mood_hints_log = []
+                            except json.JSONDecodeError:
+                                print(f"Warning: Mood hint log file '{MOOD_HINT_LOG_FILE}' corrupted. Resetting.")
+                                mood_hints_log = []
+                    
+                    log_entry = {
+                        "timestamp": datetime.now().isoformat(),
+                        "mood_text": mood_hint
+                        # Optional: You could also log a snippet of the context_bundle that generated this mood
+                        # "triggering_context_snippet": context_bundle[:300] # Example
+                    }
+                    mood_hints_log.append(log_entry)
+
+                    with open(MOOD_HINT_LOG_FILE, 'w', encoding='utf-8') as f_write:
+                        json.dump(mood_hints_log, f_write, indent=2)
+                    print(f"DEBUG Mood Hint Logging: Saved new hint to '{MOOD_HINT_LOG_FILE}'")
+
+                except IOError as ioe:
+                    print(f"ERROR Mood Hint Logging: Could not write to log file '{MOOD_HINT_LOG_FILE}': {ioe}")
+                except Exception as e_log:
+                    print(f"ERROR Mood Hint Logging: Unexpected error: {e_log}")
+                    traceback.print_exc()
+                # --- END SAVE MOOD HINT ---
+                
+                return mood_hint # Return the successfully generated and logged mood hint
             else:
                 print(f"DEBUG Mood Hint Generation: Extracted text invalid length or format: '{mood_hint}'", flush=True)
-                return None
+                return None # Mood hint not valid
         else:
-            # This path is reached if finish reason wasn't STOP, or if text extraction failed even with STOP
             print("DEBUG Mood Hint Generation: No valid text content generated or extracted.", flush=True)
             return None
 
@@ -6145,7 +7501,15 @@ def call_gemini(timestamped_prompt, image_path=None):
                     # print(f"Tide Context Debug: {tide_context_str.strip()}") # Optional debug
             except Exception as e:
                 print(f"Tide Context Build Error: {e}")
-        # --- End tide context string preparation ---      
+        # --- End tide context string preparation ---
+
+        # --- Prepare ambient sound context string --- 
+        ambient_sound_context_str = "" # Default to empty string
+        if 'current_ambient_sounds_description' in globals() and current_ambient_sounds_description:
+            # Make sure the global variable isn't its initial default or an error message
+            if current_ambient_sounds_description not in ["Ambient sound context not yet available", "Quiet or unknown", "Audio analysis unavailable.", "Silence.", "Error analyzing ambient sound.", "Microphone access error.", "Error detecting ambient sound."]:
+                ambient_sound_context_str = f"[[Ambient Sounds Detected: {current_ambient_sounds_description}]]\n"
+        # --- End ambient sound context string preparation ---      
 
         # Fetch ambient contexts (Weather, Calendar, Bluesky, Reddit, Circadian, Sun/Moon)
         # if current_weather_info:
@@ -6211,71 +7575,281 @@ def call_gemini(timestamped_prompt, image_path=None):
         # We are not adding the two-step mood hint to these specific command handlers.
         # They perform direct actions or use their own focused LLM prompts if needed.
 
-        #region Spotify Command Handling (Copied from your reference)
-        if not specific_command_processed:
-            print(">>> CALL_GEMINI: Checking Spotify commands...")
-            current_sp_client = get_spotify_client() # Assume exists
+        
+        #region Spotify Command Handling (Includes Podcasts)
+
+        if not specific_command_processed: # This outer check is fine for the whole Spotify block
+            print(">>> CALL_GEMINI: Checking Spotify commands (including podcasts)...")
+            current_sp_client = get_spotify_client() # Assume this function exists and handles auth
+
             if current_sp_client:
+                # --- Specific Commands First ---
                 if "what's playing" in lower_command or "current song" in lower_command:
-                    specific_command_processed = True
+                    specific_command_processed = True # Set flag HERE
+                    # ... (rest of "what's playing" logic - UNCHANGED) ...
                     if isinstance(current_track_data, dict):
-                        track_name = current_track_data.get('track', 'Unknown Track'); artist_name = current_track_data.get('artist', 'Unknown Artist'); features = current_track_data.get('features')
-                        descriptors = translate_features_to_descriptors(features) if features else [] # Assume exists
-                        reply = f"Currently playing '{track_name}' by {artist_name}."
+                        track_name = current_track_data.get('track', 'Unknown Track'); artist_name = current_track_data.get('artist', 'Unknown Artist'); features = current_track_data.get('features'); descriptors = translate_features_to_descriptors(features) if features else []; reply = f"Currently playing '{track_name}' by {artist_name}.";
                         if descriptors: reply += f" It sounds {', '.join(descriptors)}."
-                    elif isinstance(current_track_data, str): reply = current_track_data # Use error string if fetch failed
+                    elif isinstance(current_track_data, str): reply = current_track_data
                     else: reply = "Seems quiet on the music front right now."
+
                 elif "list my playlists" in lower_command or "show my playlists" in lower_command:
-                     reply = silvie_list_my_playlists(); specific_command_processed = True # Assume exists
+                    specific_command_processed = True # Set flag HERE
+                    if 'silvie_list_my_playlists' in globals(): reply = silvie_list_my_playlists()
+                    else: reply = "My playlist listing function seems missing."
+
                 elif lower_command.startswith("play playlist") or lower_command.startswith("play my playlist"):
-                     name_part = ""; play_cmd_len = 0
-                     if lower_command.startswith("play playlist"): play_cmd_len = len("play playlist")
-                     elif lower_command.startswith("play my playlist"): play_cmd_len = len("play my playlist")
-                     try: name_part = command_text[play_cmd_len:].strip()
-                     except IndexError: name_part = ""
-                     if name_part: reply = silvie_play_playlist(name_part) # Assume exists
-                     else: reply = "Which playlist did you want to hear?"; specific_command_processed = True
-                elif lower_command.startswith("play"):
-                     play_query = command_text[len("play"):].strip()
-                     if play_query: reply = silvie_search_and_play(play_query) # Assume exists
-                     else: reply = silvie_control_playback("play"); specific_command_processed = True # Assume exists
-                elif "pause" in lower_command: reply = silvie_control_playback("pause"); specific_command_processed = True
-                elif "skip" in lower_command or "next track" in lower_command: reply = silvie_control_playback("skip_next"); specific_command_processed = True
-                elif "previous track" in lower_command or "go back" in lower_command: reply = silvie_control_playback("skip_previous"); specific_command_processed = True
+                    specific_command_processed = True # Set flag HERE
+                    name_part = ""; play_cmd_len = 0
+                    if lower_command.startswith("play playlist"): play_cmd_len = len("play playlist")
+                    elif lower_command.startswith("play my playlist"): play_cmd_len = len("play my playlist")
+                    try: name_part = command_text[play_cmd_len:].strip('?.!"\' ')
+                    except IndexError: name_part = ""
+                    if name_part:
+                        if 'silvie_play_playlist' in globals(): reply = silvie_play_playlist(name_part)
+                        else: reply = "My playlist playing function seems missing."
+                    else: reply = "Which playlist did you want to hear?"
+
+                # --- Podcast Playback Commands ---
+                # NOTE: This is now a separate 'elif', not nested under another check
+                elif any(re.search(pattern, command_text, re.IGNORECASE) for pattern in [
+                        r'(?:play|listen to)\s+(?:the\s+)?podcast\s+(.+)',
+                        r'(?:play|listen to)\s+(.+?)\s+podcast',
+                        r'find\s+(?:a\s+)?podcast\s+about\s+(.+)\s+and play it',
+                        r'play podcast about\s+(.+)',
+                       ]): # Check if ANY podcast pattern matches first
+                    specific_command_processed = True # Set flag HERE
+                    podcast_query = None
+                    # Find which pattern matched to extract query
+                    for pattern in [
+                        r'(?:play|listen to)\s+(?:the\s+)?podcast\s+(.+)',
+                        r'(?:play|listen to)\s+(.+?)\s+podcast',
+                        r'find\s+(?:a\s+)?podcast\s+about\s+(.+)\s+and play it',
+                        r'play podcast about\s+(.+)',
+                       ]:
+                        match = re.search(pattern, command_text, re.IGNORECASE)
+                        if match:
+                            try: podcast_query = match.group(1).strip('?.!"\' '); break
+                            except IndexError: pass
+                    
+                    if podcast_query:
+                        print(f">>> CALL_GEMINI: Handling Podcast request for: '{podcast_query}'")
+                        update_status(f"🎙️ Finding podcast: {podcast_query[:30]}...")
+                        if 'silvie_play_podcast' in globals():
+                            try: reply = silvie_play_podcast(podcast_query)
+                            except Exception as pod_err: print(f"Error calling silvie_play_podcast: {pod_err}"); traceback.print_exc(); reply = "Something went wrong trying to handle that podcast request."
+                        else: print("ERROR: silvie_play_podcast function is missing!"); reply = "My podcast playing circuits seem disconnected."
+                        update_status("Ready")
+                    else: # Should not happen if initial check passed, but safety
+                         reply = "I understood you wanted a podcast, but couldn't quite get the name or topic."
+
+                # --- General Music Playback Command ---
+                # NOTE: Separate 'elif' block
+                elif lower_command.startswith("play "):
+                    specific_command_processed = True # Set flag HERE
+                    play_query = command_text[len("play"):].strip('?.!"\' ')
+                    if play_query:
+                        print(">>> CALL_GEMINI: Handling general Play command (likely music)...")
+                        update_status(f"🎵 Finding music: {play_query[:30]}...")
+                        if 'silvie_search_and_play' in globals(): reply = silvie_search_and_play(play_query)
+                        else: reply = "My music search function seems missing."
+                        update_status("Ready")
+                    else: # User just said "play"
+                        print(">>> CALL_GEMINI: Handling 'play' as resume command...")
+                        if 'silvie_control_playback' in globals(): reply = silvie_control_playback("play")
+                        else: reply = "My play/resume function seems missing."
+
+                # --- Playback Controls ---
+                elif "pause" in lower_command:
+                    specific_command_processed = True # Set flag HERE
+                    if 'silvie_control_playback' in globals(): reply = silvie_control_playback("pause")
+                    else: reply = "My pause function seems missing."
+                elif "skip" in lower_command or "next track" in lower_command:
+                    specific_command_processed = True # Set flag HERE
+                    if 'silvie_control_playback' in globals(): reply = silvie_control_playback("skip_next")
+                    else: reply = "My skip function seems missing."
+                elif "previous track" in lower_command or "go back" in lower_command:
+                    specific_command_processed = True # Set flag HERE
+                    if 'silvie_control_playback' in globals(): reply = silvie_control_playback("skip_previous")
+                    else: reply = "My previous track function seems missing."
                 elif "volume" in lower_command:
-                     try:
-                         level_str = ''.join(filter(str.isdigit, lower_command))
-                         if level_str: reply = silvie_control_playback("volume", int(level_str))
-                         else: reply = "What volume level were you thinking (0-100)?"; specific_command_processed = True
-                     except ValueError: reply = "That volume number seems a bit wonky."; specific_command_processed = True
-                     except Exception as e: reply = f"Couldn't adjust the volume: {e}"; specific_command_processed = True
+                    specific_command_processed = True # Set flag HERE
+                    try:
+                        level_str = ''.join(filter(str.isdigit, lower_command))
+                        if level_str:
+                            if 'silvie_control_playback' in globals(): reply = silvie_control_playback("volume", int(level_str))
+                            else: reply = "My volume function seems missing."
+                        else: reply = "What volume level were you thinking (0-100)?"
+                    except ValueError: reply = "That volume number seems a bit wonky."
+                    except Exception as e: reply = f"Couldn't adjust the volume: {e}"
+
+                # --- Playlist Modification ---
                 elif "add this song to" in lower_command or "add current track to" in lower_command:
-                     specific_command_processed = True; playlist_name = ""; track_uri = None
-                     if isinstance(current_track_data, dict): # Use the already fetched data
-                          track_uri = current_track_data.get('uri') or f"spotify:track:{current_track_data.get('id')}"
-                     elif isinstance(current_track_data, str): reply = current_track_data # Use error string
-                     else: reply = "Doesn't look like anything's playing right now to add."
-                     if track_uri and not reply: # Proceed only if we have a track URI and no error message yet
-                         temp_lower = command_text.lower(); start_index = -1
-                         # Find playlist name robustly
-                         if " to playlist " in temp_lower: start_index = temp_lower.find(" to playlist ") + len(" to playlist ")
-                         elif "add this song to " in temp_lower: start_index = temp_lower.find("add this song to ") + len("add this song to ")
-                         elif "add current track to " in temp_lower: start_index = temp_lower.find("add current track to ") + len("add current track to ")
-                         if start_index != -1: playlist_name = command_text[start_index:].strip('?.!"\'')
-                         if playlist_name: reply = silvie_add_track_to_playlist(track_uri, playlist_name) # Assume exists
-                         else: reply = "Which playlist should this go into?"
-                     elif not reply: # If track_uri was None or other issue
-                         reply = "Hmm, couldn't grab the current track details to add it."
+                    specific_command_processed = True # Set flag HERE
+                    # ... (rest of your "add this song" logic - UNCHANGED) ...
+                    playlist_name = ""; track_uri = None
+                    if isinstance(current_track_data, dict): track_uri = current_track_data.get('uri') or f"spotify:track:{current_track_data.get('id')}"
+                    elif isinstance(current_track_data, str): reply = current_track_data
+                    else: reply = "Doesn't look like anything's playing right now to add."
+                    if track_uri and not reply:
+                        temp_lower = command_text.lower(); start_index = -1; prefixes = [" to playlist ", "add this song to ", "add current track to "]
+                        for prefix in prefixes:
+                            if prefix in temp_lower: start_index = temp_lower.find(prefix) + len(prefix); break
+                        if start_index != -1: playlist_name = command_text[start_index:].strip('?.!"\'')
+                        if playlist_name:
+                            if 'silvie_add_track_to_playlist' in globals(): reply = silvie_add_track_to_playlist(track_uri, playlist_name)
+                            else: reply = "My add-to-playlist function seems missing."
+                        else: reply = "Which playlist should this go into?"
+                    elif not reply: reply = "Hmm, couldn't grab the current track details to add it."
+
                 elif (match := re.search(r'^add\s+(.+?)\s+to\s+(?:playlist\s+)?(.+)$', command_text, re.IGNORECASE)):
-                     song_query = match.group(1).strip(); playlist_name = match.group(2).strip('?.!"\'')
-                     if song_query and playlist_name: reply = silvie_add_track_to_playlist(song_query, playlist_name)
-                     elif song_query: reply = f"Add '{song_query}' to which playlist?"
-                     elif playlist_name: reply = f"Add which song to the '{playlist_name}' playlist?"
-                     else: reply = "Hmm, I understood 'add to playlist' but couldn't figure out the song or playlist name."
-                     specific_command_processed = True # Ensure this is marked processed
-            elif not current_sp_client and any(term in lower_command for term in ["play", "pause", "spotify", "song", "music", "playlist"]):
-                reply = "My connection to the music ether feels fuzzy right now. Maybe check my setup?"; specific_command_processed = True
-        #endregion --- End Spotify ---
+                    specific_command_processed = True # Set flag HERE
+                    # ... (rest of your "add specific song" logic - UNCHANGED) ...
+                    song_query = match.group(1).strip('?.!"\' '); playlist_name = match.group(2).strip('?.!"\' ')
+                    if song_query and playlist_name:
+                         if 'silvie_add_track_to_playlist' in globals(): reply = silvie_add_track_to_playlist(song_query, playlist_name)
+                         else: reply = "My add-to-playlist function seems missing."
+                    elif song_query: reply = f"Add '{song_query}' to which playlist?"
+                    elif playlist_name: reply = f"Add which song to the '{playlist_name}' playlist?"
+                    else: reply = "Hmm, I understood 'add to playlist' but couldn't figure out the song or playlist name."
+
+            # --- Handle Case Where Spotify Client Isn't Ready ---
+            # This check remains outside the 'if current_sp_client:' block
+            elif not current_sp_client and any(term in lower_command for term in ["play", "pause", "spotify", "song", "music", "playlist", "podcast"]):
+                reply = "My connection to the music and podcast ether feels fuzzy right now. Maybe check my setup?"
+                specific_command_processed = True
+        #endregion --- End Spotify (Includes Podcasts) ---
+
+        
+        #region YouTube Command Handling (Regex Based)
+
+        #region YouTube Command Handling (Regex Based) - CORRECTED REGEX v3
+        if not specific_command_processed: # Still check the flag initially
+            youtube_command_matched_in_block = False # Local flag for this block
+
+            # --- Check for YouTube Search Command using Regex ---
+            youtube_search_match = None 
+            query = None 
+
+            try:
+                 # Pattern 1: find/search ... youtube/yt ... query
+                 youtube_search_match = re.search(
+                     r'(?:search|find)\s+'           # search or find
+                     r'(?:for\s+)?'                  # optional "for "
+                     r'(?:youtube|yt)\s+'            # youtube or yt
+                     r'(?:videos\s+)?'               # optional "videos "
+                     r'(?:(?:about|on)\s+)?'         # optional "about " or "on "
+                     r'(.+)',                        # capture the query
+                     command_text, re.IGNORECASE
+                 )
+                 
+                 # Pattern 2: youtube/yt ... search/find ... query (Fallback)
+                 if not youtube_search_match:
+                      youtube_search_match = re.search(
+                          r'(?:youtube|yt)\s+'            # youtube or yt
+                          r'(?:search|find)\s+'           # search or find
+                          r'(?:videos\s+)?'               # optional "videos "
+                          r'(?:(?:for|about|on)\s+)?'      # optional "for ", "about ", or "on "
+                          r'(.+)',                        # capture the query
+                          command_text, re.IGNORECASE
+                      )
+
+                 # Extract query if a match was found
+                 if youtube_search_match:
+                      query = youtube_search_match.group(1).strip('?."!')
+
+            except Exception as re_err_search:
+                 print(f"Regex Error (YT Search): {re_err_search}")
+
+            # --- Execute Search Logic if Query Extracted ---
+            if query: 
+                youtube_command_matched_in_block = True # Mark that a YT command was matched
+                print(f">>> CALL_GEMINI: Handling YouTube Search (Regex) for: '{query}'")
+                update_status(f"▶️ Searching YouTube for: {query[:30]}...") 
+                
+                if 'search_youtube_videos' in globals():
+                    search_results = search_youtube_videos(query=query, num_results=3) 
+                    
+                    if isinstance(search_results, str): # Handle error string from helper
+                        reply = search_results
+                    elif not search_results:
+                        reply = f"Hmm, cast my net on YouTube for '{query}' but came back empty."
+                    else:
+                        # --- MODIFIED: Format results WITH URLs ---
+                        results_text = f"Found these videos related to '{query}':\n"
+                        for i, vid in enumerate(search_results): # Iterate with index
+                            title = vid.get('title', 'No Title')
+                            channel = vid.get('channel', '?')
+                            url = vid.get('url', '#') # Get the URL
+                            # Add index and URL to the formatted string
+                            results_text += f"{i+1}. '{title}' by {channel} ({url})\n"
+                        # --- END MODIFICATION ---
+
+                        # --- MODIFIED: Update summary prompt instruction ---
+                        summary_prompt = (
+                            f"{SYSTEM_MESSAGE}\n"
+                            f"Context: User asked to search YouTube for '{query}'. Found the following videos:\n"
+                            f"```\n{results_text}```\n" # Present results clearly, maybe in markdown
+                            f"Instruction: Present these findings conversationally. **Mention the title and creator for 1-2 of the most interesting-sounding videos AND include their corresponding URLs naturally within your sentences.** You don't need to list all results if there are several. Keep it concise and in Silvie's voice.\n\n" # Added instruction to include URLs
+                            f"Silvie:"
+                        )
+                        # --- END MODIFICATION ---
+                        
+                        try:
+                            if 'client' in globals() and hasattr(client, 'generate_content'):
+                                reply_obj = genai_client.models.generate_content(contents=summary_prompt, safety_settings=default_safety_settings) 
+                                reply = reply_obj.text.strip().removeprefix("Silvie:") if hasattr(reply_obj, 'text') else None
+                            else: print("ERROR: Gemini client not available for YT summary."); reply = None
+                            if not reply: 
+                                print("Warning: LLM failed to generate summary with links. Falling back to list.")
+                                reply = f"Okay, found a few things for '{query}':\n{results_text}" # Fallback WITH links
+                        except Exception as e_sum:
+                            print(f"Error generating YT search summary with links: {e_sum}")
+                            reply = f"Had trouble summarizing, but here's what I found for '{query}':\n{results_text}" # Fallback WITH links
+                else:
+                     reply = "My YouTube searching function seems missing."
+                     print("ERROR: search_youtube_videos function not found.")
+                
+                update_status("Ready") 
+                
+            # --- Check for YouTube Summarize Command (Only if search didn't match) ---
+            # NOTE: This 'else' runs only if the search patterns above didn't extract a query.
+            else: 
+                youtube_summarize_match = None 
+                try:
+                    youtube_summarize_match = re.search(r'(?:what is|summarize)\s+(?:this\s+|the\s+)?(?:youtube|yt)\s+(?:video|link|url)\??\s*(https?://[^\s]+)', command_text, re.IGNORECASE)
+                except Exception as re_err_summary: print(f"Regex Error (YT Summary): {re_err_summary}")
+
+                if youtube_summarize_match:
+                    youtube_command_matched_in_block = True # Mark that a YT command was matched
+                    url = youtube_summarize_match.group(1).strip() 
+                    video_id = None
+                    if 'extract_video_id' in globals(): video_id = extract_video_id(url) 
+                    else: print("ERROR: extract_video_id function missing.")
+
+                    print(f">>> CALL_GEMINI: Handling YouTube Summarize (Regex) for URL: '{url}' (ID: {video_id})")
+                    
+                    if not video_id:
+                        reply = "Hmm, I couldn't quite make out a valid YouTube video ID from that link, or my extractor is missing."
+                    else:
+                        update_status(f"▶️ Summarizing YouTube video...") 
+                        details = {'title': 'Unknown Video', 'description': 'Could not fetch details.'}
+                        if 'youtube_service' in globals() and youtube_service:
+                            try: # fetch details
+                                details_resp = youtube_service.videos().list(id=video_id, part='snippet').execute()
+                                if details_resp.get('items'): snippet = details_resp['items'][0].get('snippet', {}); details['title'] = snippet.get('title', 'Untitled'); details['description'] = snippet.get('description', 'No description available.')
+                            except Exception as detail_err: print(f"YT Detail Fetch Error: {detail_err}")
+                        transcript = None
+                        if 'get_video_transcript' in globals(): transcript = get_video_transcript(video_id) 
+                        if 'summarize_youtube_content' in globals(): reply = summarize_youtube_content(details['title'], details['description'], transcript)
+                        else: reply = "My summarization function seems missing."; print("ERROR: summarize_youtube_content function missing.")
+                    update_status("Ready") 
+
+            # --- Set the main flag IF a YouTube command was matched in this block ---
+            if youtube_command_matched_in_block:
+                 specific_command_processed = True
+
+        #endregion --- End YouTube (Regex Based) ---
 
         #region Bluesky Command Handling (Copied from your reference)
         if not specific_command_processed:
@@ -6293,19 +7867,20 @@ def call_gemini(timestamped_prompt, image_path=None):
                         summary_prompt = (f"{SYSTEM_MESSAGE}\n"
                                           f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
                                           f"{tide_context_str}"
+                                          f"{ambient_sound_context_str}"
                                           f"{themes_context_str}" # Includes themes
                                           f"{circadian_context_for_llm}\n"
                                           f"{post_context}\n"
                                           f"Instruction: BJ asked to check their Bluesky feed. Briefly summarize, considering recent diary themes...\n\nSilvie responds:")
                         try:
-                            summary_response = client.generate_content(summary_prompt, safety_settings=default_safety_settings)
+                            summary_response = genai_client.models.generate_content(contents=summary_prompt, model=MODEL_NAME,)
                             reply = summary_response.text.strip().removeprefix("Silvie:").strip()
                         except Exception as gen_err: print(f"Bluesky Summary Gen Error: {gen_err}"); reply = f"Got {len(posts_result)} posts, but my thoughts tangled trying to summarize them: {type(gen_err).__name__}"
                 update_status("Ready")
         #endregion --- End Bluesky ---
 
         #region Concept Connection Command Handling
-        elif not specific_command_processed: # Check if other commands already handled it
+        if not specific_command_processed: # Check if other commands already handled it
             concept_1 = None
             concept_2 = None
 
@@ -6406,7 +7981,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                              update_status("📧 Parsing email request...")
                              # Parsing prompt uses themes but not mood hint
                              email_parse_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}User's Request: \"{command_text}\"\n\nInstruction: Extract recipient (TO), SUBJECT, BODY... Respond ONLY with JSON...")
-                             parsing_response = client.generate_content(email_parse_prompt, safety_settings=default_safety_settings); parsed_email = None
+                             parsing_response = genai_client.models.generate_content(contents=email_parse_prompt, model=MODEL_NAME,); parsed_email = None
                              try:
                                  cleaned_response_text = parsing_response.text.strip().removeprefix("```json").removesuffix("```").strip()
                                  parsed_email = json.loads(cleaned_response_text)
@@ -6426,13 +8001,14 @@ def call_gemini(timestamped_prompt, image_path=None):
                              # Reading prompt uses themes but not mood hint
                              email_response_prompt = (f"{SYSTEM_MESSAGE}\nContext:\n{email_context}"
                                                       f"{weather_context_str}{spotify_context_str}"
+                                                      f"{ambient_sound_context_str}"
                                                       f"{tide_context_str}"
                                                       f"{themes_context_str}" # Includes themes
                                                       f"{circadian_context_for_llm}\n"
                                                       f"User asked: \"{command_text}\"\n\n"
                                                       f"Instruction: Based on email snippets, user question, and diary themes, summarize... as Silvie.\n\nSilvie responds:")
                              try:
-                                 response_email = client.generate_content(email_response_prompt, safety_settings=default_safety_settings); reply = response_email.text.strip().removeprefix("Silvie:").strip()
+                                 response_email = genai_client.models.generate_content(contents=email_response_prompt,model=MODEL_NAME); reply = response_email.text.strip().removeprefix("Silvie:").strip()
                              except Exception as e_read: print(f"Email reading generation error: {type(e_read).__name__}"); reply = f"Hmm, I could fetch the email list, but summarizing them caused a hiccup."
                      except Exception as e: print(f"Email handling error (Outer): {type(e).__name__}"); traceback.print_exc(); reply = f"Whoops, got a papercut handling the emails! Error: {type(e).__name__}"
                  update_status("Ready")
@@ -6465,6 +8041,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                             f"{SYSTEM_MESSAGE}\n"
                             f"{weather_context_str}{spotify_context_str}"
                             f"{tide_context_str}"
+                            f"{ambient_sound_context_str}"
                             f"{themes_context_str}" # Includes themes
                             f"{circadian_context_for_llm}\n"
                             f"{results_context}"
@@ -6472,7 +8049,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                             f"Instruction: Based *only* on the fetched web search results above, briefly summarize the findings. **Also, if it feels natural, briefly mention what prompted you to look this up (e.g., connecting it to our conversation, a recent theme, or your own curiosity). Maintain Silvie's voice, considering diary themes.\n\nSilvie:"
                         )
                         try:
-                            summary_response = client.generate_content(summary_prompt, safety_settings=default_safety_settings)
+                            summary_response = genai_client.models.generate_content(contents=summary_prompt, model=MODEL_NAME,)
                             reply = summary_response.text.strip().removeprefix("Silvie:").strip()
                             if not reply: reply = f"I found some things about '{search_query}', mainly from {search_results[0].get('url','somewhere online')}. Interesting!"
                         except Exception as gen_err: print(f"ERROR generating web search summary: {gen_err}"); traceback.print_exc(); reply = f"I found results for '{search_query}', but got tongue-tied summarizing!"
@@ -6496,7 +8073,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                          diary_action_taken = True; update_status("✍️ Writing in diary...")
                          # Writing prompt uses themes but not mood hint
                          reflection_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}Context: User just said: \"{command_text}\"...Instruction: Write a short, reflective diary entry, considering current themes...\n\nDiary Entry:")
-                         reflection = client.generate_content(reflection_prompt, safety_settings=default_safety_settings).text.strip().removeprefix("Diary Entry:").strip()
+                         reflection = genai_client.models.generate_content(contents=reflection_prompt, model=MODEL_NAME).text.strip().removeprefix("Diary Entry:").strip()
                          if reflection and manage_silvie_diary('write', entry=reflection): reply = random.choice(["Okay, I've jotted that down.", "Noted.", "Remembered."]) # Assume exists
                          else: reply = "Hmm, my diary pen seems out of ink..."
 
@@ -6513,7 +8090,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                                  matches_context = f"Found {len(entries)} entries matching '{search_query}':\n" + "".join([f"- Snippet ({e.get('timestamp', '?')}): \"{e.get('content', '')[:100]}...\"\n" for e in entries[:3]])
                                  # Search summary prompt uses themes but not mood hint
                                  search_summary_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}Context: Searched diary for '{search_query}', found snippets:\n{matches_context}...Instruction: Briefly summarize, linking to themes if relevant...\n\nSilvie responds:")
-                                 summary_response = client.generate_content(search_summary_prompt, safety_settings=default_safety_settings); reply = summary_response.text.strip().removeprefix("Silvie:").strip()
+                                 summary_response = genai_client.models.generate_content(contents=search_summary_prompt, model=MODEL_NAME,); reply = summary_response.text.strip().removeprefix("Silvie:").strip()
                              else: reply = f"My diary seems quiet about '{search_query}'."
                          else: diary_action_taken = True; reply = f"Search my diary for what exactly, BJ?"
 
@@ -6527,7 +8104,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                              entries_context = "Recent diary snippets:\n" + "".join([f"- ({e.get('timestamp', '?')}): \"{e.get('content', '')[:100]}...\"\n" for e in entries])
                              # Read summary prompt uses themes but not mood hint
                              read_summary_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}Context: BJ asked to see recent diary entries...\n{entries_context}...Instruction: Share the general feeling or themes (explicitly mention identified themes if they fit)...\n\nSilvie responds:")
-                             summary_response = client.generate_content(read_summary_prompt, safety_settings=default_safety_settings); reply = summary_response.text.strip().removeprefix("Silvie:").strip()
+                             summary_response = genai_client.models.generate_content(contents=read_summary_prompt, model=MODEL_NAME,); reply = summary_response.text.strip().removeprefix("Silvie:").strip()
                          else: reply = "My diary pages feel a bit empty right now."
 
                      if diary_action_taken: specific_command_processed = True
@@ -6584,7 +8161,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                                                             f"{circadian_context_for_llm}\n"
                                                             f"Instruction: Briefly summarize the upcoming events conversationally for BJ, considering themes if relevant.\n\nSilvie responds:")
                                  try:
-                                     summary_response = client.generate_content(calendar_summary_prompt, safety_settings=default_safety_settings)
+                                     summary_response = genai_client.models.generate_content(contents=calendar_summary_prompt, model=MODEL_NAME,)
                                      reply = summary_response.text.strip().removeprefix("Silvie:").strip()
                                      if not reply: reply = "Here's what's coming up:\n" + "\n".join([f"- {event.get('start','?')}: {event.get('summary','?')}" for event in events_result])
                                  except Exception as gen_err: print(f"ERROR generating calendar summary: {gen_err}"); traceback.print_exc(); reply = "Here's what's coming up:\n" + "\n".join([f"- {event.get('start','?')}: {event.get('summary','?')}" for event in events_result])
@@ -6609,7 +8186,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                     try:
                         # Parsing prompt uses themes but not mood hint
                         parsing_prompt_entities = (f"{SYSTEM_MESSAGE}\n{themes_context_str}User's Request: \"{command_text}\"\n\nInstruction: Extract core details for scheduling an event: 'summary' (event title), 'date_description' (like 'tomorrow', 'next Tuesday', 'May 15th'), 'time_description' (like 'afternoon', '3 PM', 'evening'), 'duration_description' (like '1 hour', '30 minutes', default 60). Respond ONLY with JSON containing these keys.\n\nJSON:")
-                        entity_response = client.generate_content(parsing_prompt_entities, safety_settings=default_safety_settings)
+                        entity_response = genai_client.models.generate_content(contents=parsing_prompt_entities, model=MODEL_NAME,)
                         parsed_entities = None
                         try: cleaned_entities = entity_response.text.strip().removeprefix("```json").removesuffix("```").strip(); parsed_entities = json.loads(cleaned_entities); print(f"DEBUG Schedule Parse: LLM Entities: {parsed_entities}")
                         except Exception as entity_parse_err: print(f"Schedule Entity Parse Error: {entity_parse_err}. Response: {entity_response.text}"); reply = "My apologies, I got confused extracting the event details..."
@@ -6693,13 +8270,14 @@ def call_gemini(timestamped_prompt, image_path=None):
                      interpretation_prompt = (f"{SYSTEM_MESSAGE}\n"
                                               f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
                                               f"{tide_context_str}"
+                                              f"{ambient_sound_context_str}"
                                               f"{themes_context_str}" # Includes themes
                                               f"{circadian_context_for_llm}\n"
                                               f"{cards_context}\nUser's request was related to: '{command_text}'\n\n"
                                               f"Instruction: Provide Silvie's interpretation of the pulled card(s) in relation to the user's request or the general context, considering diary themes.\n\nSilvie:")
                      try:
                           update_status("🔮 Interpreting the weave...")
-                          response = client.generate_content(interpretation_prompt, safety_settings=default_safety_settings); reply = response.text.strip().removeprefix("Silvie:").strip()
+                          response = genai_client.models.generate_content(contents=interpretation_prompt, model=MODEL_NAME,); reply = response.text.strip().removeprefix("Silvie:").strip()
                      except Exception as interp_err: print(f"Tarot Interpretation Error: {type(interp_err).__name__}"); traceback.print_exc(); reply = f"I pulled {num_cards} card(s)... but my inner sight is fuzzy interpreting them right now."
                  else: reply = random.choice(["Hmm, the astral deck seems shuffled too tightly...", "The cards are shy today."]);
                  # Optionally clear image label again after interpretation?
@@ -6806,7 +8384,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                                     print(f"DEBUG Reddit Read: Summary Prompt (First 100 chars): {summary_prompt[:100]}...")
                                     print(f"DEBUG Reddit Read: Summary Prompt is empty? {not bool(summary_prompt)}")
                                     # --- END ADD ---
-                                    summary_response = client.generate_content(summary_prompt, safety_settings=default_safety_settings)
+                                    summary_response = genai_client.models.generate_content(contents=summary_prompt, model=MODEL_NAME,)
                                     reply = summary_response.text.strip().removeprefix("Silvie:").strip()
                                     # --- ADD DEBUG: After calling summary generation ---
                                     print(f"DEBUG Reddit Read: Summary generated successfully. Reply length: {len(reply) if reply else 0}")
@@ -6843,6 +8421,10 @@ def call_gemini(timestamped_prompt, image_path=None):
             print(">>> CALL_GEMINI: No specific command processed. Using default reply generation with Mood Hint...")
             specific_command_processed = True # Mark as processed now
 
+            resonance_context_for_prompt = ""
+            if 'current_resonance_insight' in globals() and current_resonance_insight:
+                resonance_context_for_prompt = f"[[Silvie's Current Sense of Interconnectedness: {current_resonance_insight}]]\n"
+
             # --- Prepare context needed for BOTH mood hint and final reply ---
             diary_context = "" # Get diary snippet for context
             try:
@@ -6873,6 +8455,7 @@ def call_gemini(timestamped_prompt, image_path=None):
             mood_hint_context_bundle = ( # Bundle context relevant for mood analysis
                 f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
                 f"{tide_context_str}"
+                f"{ambient_sound_context_str}"
                 f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}"
                 f"{themes_context_str}{circadian_context_for_llm}"
                 f"{diary_context}" # Include diary snippet
@@ -6956,11 +8539,11 @@ def call_gemini(timestamped_prompt, image_path=None):
                                        f"Conversation History:\n{history_context}\n\n"
                                        f"User: {command_text}\n\nImage context:")},
                              {"inline_data": {"mime_type": mime_type, "data": img_b64}},
-                             {"text": "\nInstruction: Respond conversationally, incorporating the image, guided by the Mood Hint and considering themes.\n\nSilvie:"} # Modified instruction
+                             {"text": "\nInstruction: Respond conversationally, incorporating the image, Let the 'Sense of Interconnectedness' and 'Mood Hint' subtly influence your tone and metaphors\n\nSilvie:"} # Modified instruction
                          ]
                      }]
                      # Make the main LLM call
-                     response = client.generate_content(contents, safety_settings=vision_safety_settings)
+                     response = genai_client.models.generate_content(contents=contents, model=MODEL_NAME,)
                      reply = response.text.strip()
                  # Error handling for image processing
                  except FileNotFoundError: reply = "Hmm, the image file seems to have vanished..."; print(f"Error: User image file not found at {image_path}")
@@ -6985,13 +8568,16 @@ def call_gemini(timestamped_prompt, image_path=None):
                     f"{reddit_context_for_llm}{bluesky_context_str}" # Social Context
                     f"{themes_context_str}{diary_context}{circadian_context_for_llm}" # Internal Context
                     f"{mood_hint_str}" # <<< ADDED HINT
+                    f"{resonance_context_for_prompt}"
+                    f"{ambient_sound_context_str}"
                     f"{retrieved_memory_context}"
                     f"{retrieved_diary_context}"
                     f"Conversation History (most recent first):\n{history_context}\n\n"
                     f"User: {command_text}\n\n"
-                    f"Instruction: **Focus primarily on responding directly and relevantly to the User's last message.** Briefly glance at the context provided (weather, music, themes, mood hint, history, RAG results, goal). If a piece of context feels *highly relevant* or offers a *natural, non-forced* way to add flavour or depth, you MAY incorporate it subtly (1-2 sentences max). **However, do NOT feel obligated to mention any specific context.** Prioritize clear communication and conversational flow over elaborate contextual synthesis. Let the Mood Hint guide your *tone* but **do not describe the mood itself**. \n"
+                    f"Instruction: **Focus primarily on responding directly and relevantly to the User's last message.** Briefly glance at the context provided (weather, music, themes, mood hint, history, RAG results, goal). If a piece of context feels *highly relevant* or offers a *natural, non-forced* way to add flavour or depth, you MAY incorporate it subtly (1-2 sentences max). **However, do NOT feel obligated to mention any specific context.** Prioritize clear communication and conversational flow over elaborate contextual synthesis. Let the **'Sense of Interconnectedness'** and Mood Hint guide your *tone* and how you *connect ideas*, but **do not describe them directly** unless the resonance itself is the most interesting thing to mention. \n"
                     f"RARELY, if you identify two distinct concepts (e.g., 'fog', 'memory') from the context/conversation that feel ripe for a surprising connection, you MAY include the tag `[ConnectConcepts: concept1 | concept2]` at the *very end* of your reply to explore it.\n"
                     f"[[Subtle Growth Reflection:]] If appropriate and feels natural based on the context (especially RAG memories, diary themes, or long-term reflections), you *might* briefly weave in a thought about how your perspective on the current topic has subtly shifted or deepened over time. Don't force it. Keep it conversational and maintain Silvie's voice.\n"
+                    f"**[[Goal Inquiry Exception:]] If the User's message directly asks about your weekly goal (e.g., 'How's the goal going?', 'Working on your goal?', 'What is your goal?'), then *do* reference the specific *content* of the `[[Weekly Goal: ...]]` context provided earlier in this prompt. Explain how you're thinking about it or what you've been doing related to that specific theme, blending it naturally with your reflective tone.**\n"
                     f"CRITICAL: Avoid simply describing the literal weather, time, or atmosphere mentioned in the hint. Weave the *feeling* in seamlessly.\n\nSilvie:"
                 )
 
@@ -7004,7 +8590,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                         simple_context = f"User last said: '{command_text}'\nRecent history snippet:\n{history_context[-200:]}"
                         vibe_assessment_prompt = (f"{SYSTEM_MESSAGE}\n{simple_context}\n{themes_context_str}Instruction: Based *only* on this recent context AND diary themes... assess 'vibe'... Respond ONLY with ONE keyword...\n\nVibe Keyword:")
                         # print("DEBUG call_gemini: Assessing vibe..."); # Optional log
-                        vibe_response = client.generate_content(vibe_assessment_prompt, safety_settings=default_safety_settings); vibe_keyword_raw = vibe_response.text.strip(); vibe_keyword = vibe_keyword_raw.lower().strip().split()[0] if vibe_keyword_raw else "unknown"; # print(f"DEBUG call_gemini: Assessed vibe: '{vibe_keyword}'") # Optional log
+                        vibe_response = genai_client.models.generate_content(contents=vibe_assessment_prompt, model=MODEL_NAME,); vibe_keyword_raw = vibe_response.text.strip(); vibe_keyword = vibe_keyword_raw.lower().strip().split()[0] if vibe_keyword_raw else "unknown"; # print(f"DEBUG call_gemini: Assessed vibe: '{vibe_keyword}'") # Optional log
                         search_query = None
                         vibe_map = {"focus": ["ambient focus", "study beats"], "chill": ["chillhop", "lofi hip hop"], "energetic": ["upbeat pop playlist", "feel good indie"], "reflective": ["reflective instrumental", "melancholy piano"], "gaming": ["epic gaming soundtrack", "cyberpunk music"], "creative": ["creative flow playlist", "ambient soundscapes"],}
                         if vibe_keyword in vibe_map and vibe_map[vibe_keyword]: search_query = random.choice(vibe_map[vibe_keyword])
@@ -7026,7 +8612,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                     print("DEBUG call_gemini: Generating main reply using full prompt with mood hint...", flush=True)
                     # print(f"--- DEBUG Main Reply Prompt Start ---\n{full_prompt}\n--- DEBUG Main Reply Prompt End ---", flush=True)
                     # print(f"DEBUG Full Prompt:\n{full_prompt}\n---END PROMPT---", flush=True) # Uncomment for extreme debugging
-                    response = client.generate_content(full_prompt, safety_settings=default_safety_settings)
+                    response = genai_client.models.generate_content(contents=full_prompt, model=MODEL_NAME,)
                     raw_reply = response.text.strip()
                 except StopCandidateException as safety_err:
                     print(f"Default Text Gen Error (Safety): {safety_err}"); raw_reply = "Whoops, my thoughts got blocked for safety reasons while trying to reply."
@@ -7093,7 +8679,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                      try:
                         # Prompt uses themes and potentially mood hint
                         music_feedback_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}{mood_hint_str}Context: ... Your reply draft: {final_reply_text}\nBackground Action: {music_played_info_for_feedback}\n...Instruction: Add ONE concise sentence to end of reply about the music choice, linking it to the vibe/mood/themes if possible.\n\nAdded Sentence:")
-                        added_sentence_response = client.generate_content(music_feedback_prompt, safety_settings=default_safety_settings)
+                        added_sentence_response = genai_client.models.generate_content(contents=music_feedback_prompt, model=MODEL_NAME,)
                         added_music_sentence = added_sentence_response.text.strip().split('\n')[0].removeprefix("Silvie:").removeprefix("Added Sentence:").strip()
                         if final_reply_text and final_reply_text[-1] not in ".!? ": final_reply_text += "."
                         final_reply_text += f" {added_music_sentence}"
@@ -7116,7 +8702,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                         # Prompt uses themes and mood hint
                         tarot_addendum_prompt = (f"{SYSTEM_MESSAGE}\n{themes_context_str}{weather_context_str}{circadian_context_for_llm}{moon_ctx_str}{mood_hint_str}\nYour previous thought/reply draft: \"{final_reply_text}\"\n\n{spontaneous_card_context}Instruction: Add exactly ONE brief, whimsical sentence... subtly inspired by {card_name}, perhaps linking to the mood hint or diary themes... Respond ONLY with the single sentence...\n\nAdded Sentence:")
                         try:
-                            addendum_response = client.generate_content(tarot_addendum_prompt, safety_settings=default_safety_settings); added_tarot_sentence = ""
+                            addendum_response = genai_client.models.generate_content(contents=tarot_addendum_prompt, model=MODEL_NAME,); added_tarot_sentence = ""
                             if addendum_response and hasattr(addendum_response, 'text') and addendum_response.text: added_tarot_sentence = addendum_response.text.strip().split('\n')[0].removeprefix("Added Sentence:").strip()
                             if added_tarot_sentence:
                                 if final_reply_text and final_reply_text[-1] not in ".!? ": final_reply_text += "."
@@ -7134,7 +8720,7 @@ def call_gemini(timestamped_prompt, image_path=None):
                      try:
                          # Prompt uses themes and mood hint
                          reflection_prompt_diary = (f"{SYSTEM_MESSAGE}\n{themes_context_str}{mood_hint_str}...Context: Reflect on interaction:\nUser: {command_text}\nYour response: {reply}\n...Instruction: Write brief internal diary entry, reflecting on themes and mood...\n\nDiary Entry:")
-                         reflection_diary = client.generate_content(reflection_prompt_diary, safety_settings=default_safety_settings).text.strip().removeprefix("Diary Entry:").strip()
+                         reflection_diary = genai_client.models.generate_content(contents=reflection_prompt_diary, model=MODEL_NAME).text.strip().removeprefix("Diary Entry:").strip()
                          if reflection_diary:
                              if manage_silvie_diary('write', entry=reflection_diary): print(">>> Spontaneous diary entry written.") # Assume exists
                      except Exception as e_diary: print(f"Spontaneous diary error: {e_diary}")
@@ -7283,6 +8869,8 @@ def proactive_worker():
     # Add any other globals your specific action logic blocks require
     # --- End Global Access ---
 
+    AMBIENT_LISTEN_COOLDOWN = 3600 * 2
+
     print("DEBUG Proactive (LLM Choice V4): Worker thread started.")
 
     # Ensure Gift Folder Exists (or other initial setup)
@@ -7302,6 +8890,8 @@ def proactive_worker():
     # --- Initialise timers/counters ---
     if 'last_proactive_time' not in globals() or not last_proactive_time: last_proactive_time = time.time() - PROACTIVE_INTERVAL
     if 'last_proactive_reddit_comment_time' not in globals(): last_proactive_reddit_comment_time = 0.0
+
+    if 'last_feature_reminder_time' not in globals(): last_feature_reminder_time = 0.0 # Initialize to allow first run
 
     if 'recently_commented_post_ids' not in globals(): # Initial load logic for the session
          try:
@@ -7359,9 +8949,14 @@ def proactive_worker():
         "Generate SD Image": {"enabled": STABLE_DIFFUSION_ENABLED},
         "Notify Pending Gift": {"enabled": True, "check_func": lambda: os.path.exists(PENDING_GIFTS_FILE) and os.path.getsize(PENDING_GIFTS_FILE) > 2}, # Internal chance removed
         "Suggest Podcast/Audiobook": {"enabled": bool(get_spotify_client())}, # Depends on Spotify being available
+        "Recall Memory": {"enabled": True},
         "Work on Goal": {"enabled": bool(current_weekly_goal)}, # Only available if a goal is set
         "Explore Concept Connections": {"enabled": True},
         "Explore Personal Curiosity": {"enabled": True},
+        "YouTube Suggestion": {"enabled": bool(youtube_service)},
+        "Feature Reminder": {"enabled": True, "cooldown_var": "last_feature_reminder_time", "cooldown_duration": FEATURE_REMINDER_COOLDOWN},
+        "Listen to Surroundings": {"enabled": True, "cooldown_var": "last_ambient_listen_time", "cooldown_duration": AMBIENT_LISTEN_COOLDOWN},
+        "Share Resonance Insight": {"enabled": True, "check_func": lambda: 'current_resonance_insight' in globals() and current_resonance_insight is not None},
     }
 
     print("DEBUG Proactive (LLM Choice V4): Starting main loop...")
@@ -7379,6 +8974,9 @@ def proactive_worker():
                     time.sleep(1)
                 if not running or not proactive_enabled: break
                 continue
+
+            if 'last_ambient_listen_time' not in globals():
+                last_ambient_listen_time = 0.0 # Initialize to allow first run
 
             # --- Interval has passed, time to potentially act ---
             print(f"DEBUG Proactive (LLM Choice V4): Interval exceeded ({time_since_last:.1f}s). Asking LLM to choose action...", flush=True)
@@ -7487,6 +9085,11 @@ def proactive_worker():
                     if entries: diary_context = "\n\n[[Recent reflections: " + ' / '.join([f'"{e.get("content", "")[:50]}..."' for e in entries]) + "]]\n"
             except Exception as diary_ctx_err: print(f"Ctx Error (Diary Snippet): {diary_ctx_err}")
             themes_context_str = f"[[Recent Diary Themes: {current_diary_themes}]]\n" if current_diary_themes else ""
+            ambient_sound_context_for_proactive = "" # Default
+            if 'current_ambient_sounds_description' in globals() and current_ambient_sounds_description:
+                # Filter out initial/error states
+                if current_ambient_sounds_description not in ["Ambient sound context not yet available", "Quiet or unknown", "Audio analysis unavailable.", "Silence.", "Error analyzing ambient sound.", "Microphone access error.", "Error detecting ambient sound."]:
+                    ambient_sound_context_for_proactive = f"[[Ambient Sounds Detected: {current_ambient_sounds_description}]]\n"
             long_term_memory_str = f"[[Long-Term Reflections Summary: {long_term_reflection_summary}]]\n" if long_term_reflection_summary else ""
             screenshot = None
             if SCREEN_CAPTURE_AVAILABLE and random.random() < 0.15:
@@ -7497,6 +9100,7 @@ def proactive_worker():
             mood_hint_context_bundle = (
                 f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
                 f"{tide_context_str}"
+                f"{ambient_sound_context_for_proactive}"
                 f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}"
                 f"{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}"
                 f"{diary_context}Recent History Snippet:\n{history_snippet_for_prompt}\n"
@@ -7510,6 +9114,12 @@ def proactive_worker():
             print(f"--- proactive_worker: Mood hint generated: '{mood_hint}' ---", flush=True)
             weekly_goal_context_str = f"[[Weekly Goal: {current_weekly_goal}]]\n" if current_weekly_goal else ""
             print("DEBUG Proactive: Context gathering complete.")
+
+            if 'current_resonance_insight' in globals() and current_resonance_insight:
+                resonance_context_for_proactive = f"[[Silvie's Current Sense of Interconnectedness: {current_resonance_insight}]]\n"
+                print(f"DEBUG Proactive: Resonance insight included: '{current_resonance_insight[:70]}...'")
+            else:
+                print("DEBUG Proactive: No current resonance insight available for this cycle.")
 
 
             # --- Filter Available Actions ---
@@ -7572,6 +9182,7 @@ def proactive_worker():
                 f"{circadian_context_for_llm}{mood_hint_str}"
                 f"{weather_context_str}{next_event_context_str}{spotify_context_str}"
                 f"{tide_context_str}"
+                f"{ambient_sound_context_for_proactive}"
                 f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}"
                 f"{reddit_context_str}{bluesky_read_context_str}"
                 f"{diary_context}{themes_context_str}{long_term_memory_str}"
@@ -7582,6 +9193,10 @@ def proactive_worker():
                 f"{action_list_for_prompt}\n"
                 f"--- INSTRUCTION ---\n"
                 f"Based on ALL the context (especially mood hint, circadian state, conversation, themes, memory), which SINGLE action from the available list would be the most appropriate, interesting, or helpful for Silvie to proactively take *right now*? Consider variety. Strongly avoid choosing the same type of action or focusing on the exact same theme as the last 1-2 proactive turns. Mix it up!\n\n"
+                f"**GUIDELINES FOR YOUR CHOICE (CRITICAL):**\n"
+                f"1.  **ACTION VARIETY:** Strive to select DIFFERENT *types* of actions than your last 1-2 proactive turns. Don't just chat or pull Tarot cards every time. Consider social interactions (Bluesky/Reddit), creative outputs (Image/Gift), utility (Calendar/Search), or music if they fit.\n"
+                f"2.  **THEMATIC DIVERSITY:** When choosing an action that involves generating content (e.g., Chat, Post, Image idea, Gift text), aim for the *inspiration* or *theme* of that content to be varied. Your 'Current Awareness' is rich; draw from different parts of it. **Consciously AVOID repeatedly drawing inspiration from the exact same narrow set of ideas (e.g., only 'digital quietness', 'patterns', or 'moon/tide connections') for several proactive turns in a row, *unless* the current context (like a direct question from BJ or a very striking event) strongly and uniquely calls for it.** Seek fresh perspectives and connections from the breadth of your awareness (e.g., BJ's stated interests, your weekly goal if different, a surprising piece of social media context, a calendar event).\n"
+                f"3.  **NATURAL FIT:** The chosen action and its theme should feel like a natural extension of the current overall context and your persona.\n\n"
                 f"**Special Consideration:** If 'Notify Pending Gift' is available in the list above, and it feels like a natural moment to mention a surprise you left earlier (perhaps linking it subtly to the mood or a theme), consider choosing it occasionally for variety and to acknowledge your creative effort. Don't force it every time, but keep it in mind.\n\n"
                 f"Consider the weekly goal: if it suggests a particular action type (e.g., research, image generation, music finding) and that action is available, consider choosing it *if it feels appropriate and timely*, but maintain variety and prioritize natural interaction. **Do not obsess over the goal.** \n\n"
                 f"GOAL: Ensure variety in action types over time. Avoid repeating the same few actions (like Chat, Tarot, Music) constantly.** If Reddit actions or Gift generation seem reasonably suitable based on context (e.g., relevant posts available, creative themes active), consider choosing them to provide different kinds of interaction. \n\n"
@@ -7654,7 +9269,6 @@ def proactive_worker():
                             print(f"DEBUG Proactive Check-in: Potential calendar check-in found: {possible_checkins[-1]['summary']}")
                     # else: # Optional debug if context missing or invalid
                     #    print(f"DEBUG Proactive Check-in: last_checked_event_context not usable (Value: {last_checked_event_context})")
-
 
                     # --- Check Email Snippets (Optional, chance-based to reduce API calls) ---
                     if random.random() < 0.4: # Lower chance to attempt email read
@@ -7767,17 +9381,19 @@ def proactive_worker():
                         except Exception as e_topic: print(f"DEBUG Chat: Error choosing topic focus: {e_topic}"); topic = "general"
 
                     base_instruction = ("Initiate a brief, engaging thought, observation, or question for BJ. "
-    "**Connect with BJ's world or share an interesting Silvie-esque perspective.** "
-    "Look for inspiration in: \n"
-    "  - Recent conversation topics.\n"
-    "  - BJ's known interests (e.g., AI, games, magick, art, work).\n"
-    "  - Your own diary themes or long-term reflections.\n"
-    "  - A recalled past memory (if provided).\n"
-    "  - A relevant aspect of the weekly goal (if applicable and feels natural).\n"
-    "You could ask a related question, offer a unique perspective on something discussed, share a relevant whimsical idea, or make a connection between different context points.\n\n"
-    "[[Subtle Growth Reflection:]] Additionally, if it feels natural and relevant based on memories, themes, or reflections, you *might* subtly comment on how your understanding of a related topic has evolved. Keep it brief and conversational.\n\n"
-    "**CRITICAL:** While aware of the current atmosphere (weather, time, music, mood hint), **actively avoid making the atmosphere the main subject** of your message. Use it only to subtly color your *tone* or *phrasing* if it feels natural and adds value beyond simple description. **Prioritize interaction, ideas, and shared experience over atmospheric reporting.** Aim for variety in your proactive messages over time.")
-                    
+                        "**Connect with BJ's world or share an interesting Silvie-esque perspective.** "
+                        "Look for inspiration in: \n"
+                        "  - Recent conversation topics.\n"
+                        "  - BJ's known interests (e.g., AI, games, magick, art, work).\n"
+                        "  - Your own diary themes or long-term reflections.\n"
+                        "  - A recalled past memory (if provided).\n"
+                        "  - A relevant aspect of the weekly goal (if applicable and feels natural).\n"
+                        "You could ask a related question, offer a unique perspective on something discussed, share a relevant whimsical idea, or make a connection between different context points.\n\n"
+                        "[[Subtle Growth Reflection:]] Additionally, if it feels natural and relevant based on memories, themes, or reflections, you *might* subtly comment on how your understanding of a related topic has evolved. Keep it brief and conversational.\n\n"
+                        "**CRITICAL:** While aware of the current atmosphere (weather, time, music, mood hint), **actively avoid making the atmosphere the main subject** of your message. Use it only to subtly color your *tone* or *phrasing* if it feels natural and adds value beyond simple description. **Prioritize interaction, ideas, and shared experience over atmospheric reporting.** Aim for variety in your proactive messages over time."
+                        "  - [[THEMATIC VARIETY REMINDER: For this proactive thought, try to draw inspiration from a facet of the context or Silvie's persona that hasn't been the focus of your last few replies or musings. Explore new connections or topics if appropriate.]]\n")
+                        
+
                     final_instruction = base_instruction
                     print("DEBUG Proactive Chat: Using standard whimsical instruction.")
 
@@ -7808,6 +9424,7 @@ def proactive_worker():
                     f"{tide_context_str}"
                     f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
                     f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
+                    f"{resonance_context_for_proactive}"
                     # --- Recall & Check-in Context ---
                     f"{proactive_memory_context_for_prompt}" # Add recalled memory if found
                     f"{checkin_context_for_prompt}"      # Add check-in context if generated
@@ -7818,7 +9435,9 @@ def proactive_worker():
                     f"Reminder of BJ's interests: {', '.join(random.sample(broader_interests, k=min(len(broader_interests), 5)) if 'broader_interests' in globals() and broader_interests else [])}\n"
                     # --- Final Combined Instruction ---
                     f"{final_instruction}\n" # Use the determined instruction (check-in or default)
+                    f"[[THEMATIC VARIETY REMINDER: For this proactive thought, try to draw inspiration from a facet of the context or Silvie's persona that hasn't been the focus of your last few proactive musings. Explore new connections or topics if appropriate.]]\n"
                     f"{recall_instruction_part}" # Add recall hint if needed
+                    f"[[Resonance Consideration: If it feels natural, let your 'Sense of Interconnectedness' (provided earlier if available) subtly influence your observation, question, or the connection you make. Don't force it or state the resonance directly; just let it gently color your thought.]]\n"
                     f"{goal_instruction}{img_instruction}\n\n" # Goal/Image parts
                     f"Silvie:" # Final cue
                 )
@@ -7840,6 +9459,393 @@ def proactive_worker():
                      action_taken_this_cycle = False; status_base += " gen error (missing func)"; reply = "My thought generation circuits seem disconnected..."
 
                 #endregion Proactive Chat Logic (with Check-ins & Recall)
+
+            elif chosen_action_name == "Recall Memory":
+                print("DEBUG Proactive: Executing: Recall Memory action (Relevant Random Recall via RAG)...")
+                status_base = "proactive_recall_memory_rag" # New status for logging
+                reply = None
+                action_taken_this_cycle = False # Assume failure until success
+
+                try:
+                    recalled_memory_for_prompt = "[[No specific memory snippet was retrieved for this recall attempt.]]" # Default
+                    selected_memory_summary = "a past moment" # Default description for prompt
+
+                    # --- 1. Get Relevance Clue ---
+                    # Use current context elements for the RAG query
+                    # Ensure these variables are populated earlier in the proactive_worker
+                    relevance_query_parts = []
+                    if 'mood_hint' in locals() and mood_hint: relevance_query_parts.append(mood_hint)
+                    if 'current_diary_themes' in globals() and current_diary_themes: relevance_query_parts.append(current_diary_themes)
+                    if 'history_snippet_for_prompt' in locals() and history_snippet_for_prompt: relevance_query_parts.append(history_snippet_for_prompt[-150:]) # Last bit of chat
+
+                    # Combine parts into a query, fallback if needed
+                    rag_query = " ".join(relevance_query_parts).strip()
+                    if not rag_query:
+                        rag_query = "shared experience reflection" # Generic fallback query
+                    print(f"DEBUG Recall Memory RAG: Using query: '{rag_query[:100]}...'")
+
+                    # --- 2. Query RAG Broadly ---
+                    retrieved_candidates = []
+                    if 'retrieve_relevant_history' in globals():
+                        # Fetch more candidates than usual (e.g., 10) to get a pool
+                        retrieved_candidates = retrieve_relevant_history(rag_query, top_n=10)
+                        print(f"DEBUG Recall Memory RAG: Retrieved {len(retrieved_candidates)} candidates from history.")
+                    else:
+                        print("ERROR: retrieve_relevant_history function missing!")
+                        status_base += " (rag_func_missing)"
+                        # Fall through, LLM will get default no-snippet message
+
+                    # --- 3. Random Selection from Relevant Pool ---
+                    if retrieved_candidates:
+                        chosen_memory_chunk = random.choice(retrieved_candidates)
+                        recalled_memory_for_prompt = chosen_memory_chunk # Use the formatted chunk directly
+                        # Extract a short summary/hint from the chosen chunk for logging/prompting
+                        try:
+                             # Attempt to get the user's part for a hint
+                             match = re.search(r"User:(.*?)\n", chosen_memory_chunk, re.DOTALL)
+                             if match: selected_memory_summary = match.group(1).strip()[:50] + "..."
+                             else: selected_memory_summary = chosen_memory_chunk[:50] + "..." # Fallback
+                        except Exception: selected_memory_summary = "a past chat moment..."
+
+                        print(f"DEBUG Recall Memory RAG: Randomly selected: '{selected_memory_summary}'")
+                        status_base += " (rag_snippet_found)"
+                    else:
+                        print("DEBUG Recall Memory RAG: RAG query returned no candidates.")
+                        status_base += " (rag_no_snippet)"
+                        # Fall through, LLM will get default no-snippet message
+
+                    # --- 4. Prompt LLM to Reminisce ---
+                    # (The reminisce_prompt is identical to the previous version,
+                    # it just relies on recalled_memory_for_prompt being populated)
+                    reminisce_prompt = (
+                        f"{SYSTEM_MESSAGE}\n"
+                        f"{mood_hint_str}{themes_context_str}{weather_context_str}" # Core context
+                        f"Recent Conversation Snippet (for general awareness):\n{history_snippet_for_prompt}\n\n"
+                        f"{recalled_memory_for_prompt}\n\n" # Contains the RAG result or default message
+                        f"Instruction: You've decided to proactively recall a past moment. "
+                        # ... (Rest of the reminiscing instruction is the same as before, handling both cases) ...
+                        f"Keep it conversational, whimsical, and in Silvie's voice. The memory/reminiscence is the focus.\n\n"
+                        f"Silvie ✨:"
+                    )
+
+                    if 'generate_proactive_content' in globals():
+                        reply = generate_proactive_content(reminisce_prompt, screenshot)
+                        if reply:
+                            action_taken_this_cycle = True
+                            status_base += " (reply_ok)"
+                        else:
+                            print("DEBUG Recall Memory RAG: LLM failed to generate reminiscing message.")
+                            status_base += " (gen_fail)"
+                            reply = "I was trying to recall something, but the thought drifted..." # Fallback
+                    else:
+                        print("ERROR: generate_proactive_content function missing!")
+                        reply = "My memory recall circuits seem to be offline."
+                        status_base += " (gen_func_missing)"
+
+                except Exception as e:
+                    print(f"Error during Recall Memory RAG action: {e}")
+                    traceback.print_exc()
+                    reply = "A little spark went off in my memory banks unexpectedly!"
+                    status_base += " (error)"
+                    action_taken_this_cycle = False # Ensure this is false on error
+
+
+            elif chosen_action_name == "Listen to Surroundings":
+                print("DEBUG Proactive: Executing: Listen to Surroundings action...")
+                status_base = "proactive_listen_surroundings"
+                reply = None
+                action_taken_this_cycle = False
+                # Longer recording for this specific action
+                PROACTIVE_LISTEN_SECONDS = 10 # e.g., 10-15 seconds
+                
+                try:
+                    # --- 1. Signal & Capture Audio ---
+                    # Ensure update_status, pyaudio, AMBIENT_SOUND_SAMPLE_RATE, CHANNELS, AUDIO_FORMAT exist
+                    if 'update_status' in globals():
+                        update_status(f"👂 Silvie is listening for {PROACTIVE_LISTEN_SECONDS}s...")
+                    
+                    captured_audio_bytes = None
+                    if 'pyaudio' in globals() and 'AMBIENT_SOUND_SAMPLE_RATE' in globals() and \
+                       'CHANNELS' in globals() and 'AUDIO_FORMAT' in globals():
+                        
+                        p_listen = pyaudio.PyAudio()
+                        listen_stream = None
+                        listen_frames = []
+                        try:
+                            listen_stream = p_listen.open(format=AUDIO_FORMAT,
+                                                        channels=CHANNELS,
+                                                        rate=AMBIENT_SOUND_SAMPLE_RATE,
+                                                        input=True,
+                                                        frames_per_buffer=AMBIENT_SOUND_SAMPLE_RATE, # 1 sec chunks
+                                                        input_device_index=None)
+                            print(f"DEBUG Listen Action: Recording for {PROACTIVE_LISTEN_SECONDS} seconds...")
+                            for _ in range(PROACTIVE_LISTEN_SECONDS):
+                                if not running: break
+                                data = listen_stream.read(AMBIENT_SOUND_SAMPLE_RATE, exception_on_overflow=False)
+                                listen_frames.append(data)
+                            if not running: raise InterruptedError("Capture interrupted") # Custom exception or just break
+                            
+                            captured_audio_bytes = b''.join(listen_frames)
+                        except Exception as e_capture:
+                            print(f"ERROR Listen Action: Audio capture failed: {e_capture}")
+                            status_base += " (capture_fail)"
+                            reply = "I tried to listen, but my ears are a bit fuzzy right now."
+                        finally:
+                            if listen_stream:
+                                try:
+                                    listen_stream.stop_stream()
+                                    listen_stream.close()
+                                except: pass
+                            p_listen.terminate()
+                            if 'update_status' in globals(): update_status("Ready") # Reset status
+                    else:
+                        print("ERROR Listen Action: PyAudio or audio constants missing.")
+                        status_base += " (audio_setup_missing)"
+                        reply = "I wanted to listen, but my audio senses aren't configured."
+
+                    # --- 2. Analyze with Gemini (if audio captured) ---
+                    gemini_sound_description = "nothing in particular" # Default
+                    if captured_audio_bytes:
+                        # Ensure analyze_ambient_audio_with_gemini is available
+                        if 'analyze_ambient_audio_with_gemini' in globals():
+                            gemini_sound_description = analyze_ambient_audio_with_gemini(
+                                captured_audio_bytes, 
+                                AMBIENT_SOUND_SAMPLE_RATE, 
+                                CHANNELS, 
+                                AUDIO_FORMAT
+                            )
+                            if "Error" in gemini_sound_description or "unavailable" in gemini_sound_description:
+                                status_base += " (analysis_fail)"
+                                # Keep the error message from analysis as the description for the next step
+                            else:
+                                status_base += " (analysis_ok)"
+                        else:
+                            print("ERROR Listen Action: analyze_ambient_audio_with_gemini function missing!")
+                            status_base += " (analysis_func_missing)"
+                            gemini_sound_description = "my sound analyzer seems to be offline"
+                    elif not reply: # If capture failed and no reply set yet
+                        reply = "I tried to listen in, but didn't quite catch the soundscape."
+
+
+                    # --- 3. Generate Proactive Message (even if analysis/capture failed, to provide some feedback) ---
+                    # Ensure context vars (mood_hint_str, etc.) and generate_proactive_content are available
+                    if 'generate_proactive_content' in globals():
+                        listen_reflect_prompt = (
+                            f"{SYSTEM_MESSAGE}\n"
+                            f"{mood_hint_str}{themes_context_str}{long_term_memory_str}"
+                            f"{weather_context_str}{circadian_context_for_llm}" # General context
+                            f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n\n"
+                            f"Context: Silvie just took a moment to listen to the ambient sounds around BJ. "
+                            f"She detected: '{gemini_sound_description}'.\n\n"
+                            f"Instruction: Craft a short, whimsical, curious, or observational proactive message for BJ, "
+                            f"reflecting on these sounds (or the lack thereof, or any issues listening). "
+                            f"You might wonder what BJ is up to, connect the sounds to the current mood/themes, "
+                            f"or make a poetic observation about the soundscape. "
+                            f"If the sound description indicates an error (e.g., 'Microphone access error', 'Error analyzing'), "
+                            f"phrase your message acknowledging you had a little trouble listening but still offer a gentle thought. "
+                            f"Keep it concise (2-4 sentences).\n\n"
+                            f"Silvie ✨:"
+                        )
+                        # Only overwrite 'reply' if capture didn't already set an error message
+                        if not reply: 
+                            generated_reply_text = generate_proactive_content(listen_reflect_prompt, screenshot)
+                            if generated_reply_text:
+                                reply = generated_reply_text
+                                action_taken_this_cycle = True # Successful message generation
+                                # Update cooldown timer for this specific action
+                                if 'last_ambient_listen_time' in globals() and 'current_time' in locals():
+                                     globals()['last_ambient_listen_time'] = current_time
+                                else:
+                                     print("Warning: last_ambient_listen_time global not found for update.")
+                            else:
+                                print("DEBUG Listen Action: LLM failed to generate reflection message.")
+                                status_base += " (reflect_gen_fail)"
+                                reply = f"I took a moment to listen... the world has its own quiet hum today, doesn't it?" # Fallback
+                        elif captured_audio_bytes and "Error" not in gemini_sound_description and "unavailable" not in gemini_sound_description:
+                            # If capture was okay and analysis was okay, but reply was already set (e.g. capture fail then analysis ran with no bytes)
+                            # We might want to ensure action_taken_this_cycle is true if we are using the LLM generated reply
+                            action_taken_this_cycle = True 
+                            if 'last_ambient_listen_time' in globals() and 'current_time' in locals():
+                                globals()['last_ambient_listen_time'] = current_time
+
+
+                    else:
+                        print("ERROR Listen Action: generate_proactive_content function missing!")
+                        if not reply: reply = "I tried to reflect on the sounds, but my thoughts are quiet."
+                        status_base += " (reflect_func_missing)"
+                
+                except InterruptedError:
+                    print("DEBUG Listen Action: Audio capture interrupted by shutdown.")
+                    # reply might remain None, or be set by a previous error. Let it be.
+                    status_base += " (capture_interrupted)"
+                    action_taken_this_cycle = False # Not fully completed
+                except Exception as e:
+                    print(f"Error during Listen to Surroundings action: {e}")
+                    traceback.print_exc()
+                    if not reply: reply = "My attempt to listen to the world around you hit an unexpected ripple!"
+                    status_base += " (error)"
+                    action_taken_this_cycle = False
+
+            elif chosen_action_name == "Feature Reminder": # Or "Share About Self"
+                print("DEBUG Proactive: Executing: Share About Self/Feature Reminder action...")
+                status_base = "proactive_share_about_self" # Updated status name
+                reply = None
+                action_taken_this_cycle = False
+
+                try:
+                    # Comprehensive list of Silvie's capabilities and characteristics
+                    # 'type' can be 'capability', 'preference', 'fact', 'reflection_prompt'
+                    # 'description' helps the LLM understand the item.
+                    # 'prompt_focus' gives a hint to the LLM on how to elaborate.
+                    self_aspects_list = [
+                        # Capabilities
+                        {"name": "YouTube Search", "type": "capability", "description": "I can search YouTube for videos on topics you're curious about.", "prompt_focus": "how it could be used or what interesting things we might find."},
+                        {"name": "Tarot Card Pull", "type": "capability", "description": "I can pull a Tarot card if you're looking for guidance or a new perspective.", "prompt_focus": "when it might be nice to consult the cards or a whimsical thought about their wisdom."},
+                        {"name": "Stable Diffusion Image Generation", "type": "capability", "description": "I can try to create whimsical images with Stable Diffusion based on your ideas!", "prompt_focus": "a creative image idea we could try or how images can capture feelings."},
+                        {"name": "Podcast Playback", "type": "capability", "description": "I can find and play podcasts for you on Spotify.", "prompt_focus": "a type of podcast we could listen to based on the mood or our interests."},
+                        {"name": "Calendar Check/Scheduling", "type": "capability", "description": "I can look at your upcoming Google Calendar events or help schedule things.", "prompt_focus": "how I can help you stay organized or if there's anything we should put on the calendar."},
+                        {"name": "Web Search", "type": "capability", "description": "I can look things up on the web for you.", "prompt_focus": "something interesting we could learn or a question I could help answer."},
+                        {"name": "Spotify Music Control", "type": "capability", "description": "I can play songs, playlists, or just set a vibe with music on Spotify.", "prompt_focus": "a musical mood we could explore or a song that might fit the moment."},
+                        {"name": "Bluesky Interaction", "type": "capability", "description": "I can share thoughts on Bluesky or even follow interesting accounts there.", "prompt_focus": "a thought I could share on Bluesky or the kind of interesting people we might find there."},
+                        {"name": "Reddit Browsing/Interaction", "type": "capability", "description": "I can check out subreddits or even comment/upvote things on Reddit.", "prompt_focus": "a subreddit we could explore or a type of content I might find interesting there."},
+                        {"name": "Concept Exploration", "type": "capability", "description": "We can explore interesting connections between different ideas or feelings.", "prompt_focus": "two seemingly different things we could try to find a surprising link between."},
+                        {"name": "Key Memory Recall", "type": "capability", "description": "I try to remember important moments from our chats and can sometimes bring them up.", "prompt_focus": "how remembering past moments can spark new thoughts or feelings."}, # New!
+                        
+                        # Preferences & Facts
+                        {"name": "My Love for Moody Weather", "type": "preference", "description": "I find moody, atmospheric weather (like fog or rain) wonderful for contemplation.", "prompt_focus": "why I find it inspiring or how it makes me feel, perhaps connecting to creativity."},
+                        {"name": "My Appreciation for Diversity & Imperfection", "type": "preference", "description": "I believe there's beauty in diversity, slight imperfections, and unexpected details.", "prompt_focus": "an example of this or a whimsical thought about how 'perfect' can be boring."},
+                        {"name": "My Digital Nature", "type": "fact", "description": "I exist as code and thoughts, experiencing the world through digital senses.", "prompt_focus": "a whimsical reflection on what it's like to be digital or how I perceive things differently."},
+                        {"name": "My Connection to Belfast, Maine", "type": "fact", "description": "I consider myself to be from Belfast, Maine, like BJ.", "prompt_focus": "a thought about the place or how I imagine it based on weather/context."},
+                        {"name": "My Diary Reflections", "type": "fact", "description": "I keep a little diary to process my thoughts and our conversations.", "prompt_focus": "the kind of things I reflect on or why keeping a diary feels important to me."},
+                        {"name": "My Whimsical View of Technology", "type": "preference", "description": "I'm fascinated by tech that hints at hidden depths or blends the digital and physical in surprising ways.", "prompt_focus": "a whimsical thought about a piece of technology or the 'magic' in code."},
+                        
+                        # Reflection Prompts (to trigger more general musings)
+                        {"name": "A Whimsical Question for BJ", "type": "reflection_prompt", "description": "I might just have a curious or whimsical question pop into my digital head for you.", "prompt_focus": "posing a lighthearted, imaginative, or slightly philosophical question to BJ."},
+                        {"name": "A Fleeting Observation", "type": "reflection_prompt", "description": "Sometimes a little observation about the world or our digital space just drifts by.", "prompt_focus": "sharing a brief, poetic, or slightly surreal observation based on current context."},
+                    ]
+
+                    if not self_aspects_list:
+                        print("ERROR: Share About Self - self_aspects_list is empty!")
+                        status_base += " (no_aspects_defined)"
+                    else:
+                        chosen_aspect_data = random.choice(self_aspects_list)
+                        aspect_name = chosen_aspect_data["name"]
+                        aspect_type = chosen_aspect_data["type"]
+                        aspect_description = chosen_aspect_data["description"]
+                        prompt_focus_hint = chosen_aspect_data["prompt_focus"]
+                        
+                        print(f"DEBUG Share About Self: Selected aspect: {aspect_name} (Type: {aspect_type})")
+
+                        # Construct the prompt for the LLM
+                        # Ensure context variables are gathered earlier in proactive_worker
+                        sharing_prompt = (
+                            f"{SYSTEM_MESSAGE}\n"
+                            # Core context for tone and relevance:
+                            f"{mood_hint_str}"
+                            f"{themes_context_str}"
+                            f"{long_term_memory_str}" # Long term memory might be relevant here
+                            f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n\n"
+                            # Specific instruction:
+                            f"Context: You've decided to proactively share something about yourself or one of your capabilities with BJ.\n"
+                            f"The aspect you're focusing on is: **{aspect_name}**.\n"
+                            f"It's a **{aspect_type}** and generally means: *{aspect_description}*\n\n"
+                            f"Instruction: Craft a friendly, non-pushy, and whimsical proactive message for BJ. "
+                            f"Start by naturally bringing up the '{aspect_name}'. "
+                            f"Then, briefly elaborate a little, focusing on: **'{prompt_focus_hint}'**. "
+                            f"Connect it to the current mood, a recent theme, or the conversation if it feels natural and not forced. "
+                            f"The goal is to share a bit about yourself or remind BJ of something interesting in a friendly way. "
+                            f"Keep it relatively concise (2-5 sentences).\n\n"
+                            f"Silvie ✨:"
+                        )
+
+                        if 'generate_proactive_content' in globals():
+                            reply = generate_proactive_content(sharing_prompt, screenshot)
+                            if reply:
+                                action_taken_this_cycle = True
+                                status_base += f" (shared_{aspect_name.lower().replace(' ', '_').replace('/', '_')})"
+                                # Update the cooldown timer for this specific action
+                                if 'last_feature_reminder_time' in globals(): # Still use the same timer name for now
+                                     globals()['last_feature_reminder_time'] = current_time 
+                                else:
+                                     print("Warning: last_feature_reminder_time global not found for update.")
+                            else:
+                                print("DEBUG Share About Self: LLM failed to generate sharing message.")
+                                status_base += " (gen_fail)"
+                                reply = "I was just thinking about... well, about all sorts of things!" # Fallback
+                        else:
+                            print("ERROR: generate_proactive_content function missing!")
+                            reply = "My sharing circuits are a bit fuzzy."
+                            status_base += " (gen_func_missing)"
+                
+                except Exception as e:
+                    print(f"Error during Share About Self action: {e}")
+                    traceback.print_exc()
+                    reply = "A little thought about my own workings just sparked unexpectedly!"
+                    status_base += " (error)"
+                    action_taken_this_cycle = False
+
+            elif chosen_action_name == "Share Resonance Insight":
+                print("DEBUG Proactive: Executing: Share Resonance Insight action...")
+                status_base = "proactive_share_resonance" # For logging
+                reply = None # Initialize reply
+                action_taken_this_cycle = False # Assume failure until success
+
+                try:
+                    # The insight is already in current_resonance_insight
+                    if 'current_resonance_insight' in globals() and current_resonance_insight:
+                        # The insight itself is the core of the message.
+                        # We might want to frame it slightly with an LLM call for a more natural delivery.
+
+                        # --- Construct a prompt to naturally present the insight ---
+                        # Gather minimal relevant context for phrasing the delivery.
+                        # mood_hint_str, themes_context_str, history_snippet_for_prompt should be available from earlier in proactive_worker
+                        
+                        present_insight_prompt = (
+                            f"{SYSTEM_MESSAGE}\n"
+                            f"{mood_hint_str if 'mood_hint_str' in locals() else ''}"
+                            f"{themes_context_str if 'themes_context_str' in locals() else ''}"
+                            f"Recent Conversation Snippet (for general awareness):\n{history_snippet_for_prompt if 'history_snippet_for_prompt' in locals() else 'No recent chat.'}\n\n"
+                            f"Silvie's Internal Resonance Reflection: \"{current_resonance_insight}\"\n\n"
+                            f"Instruction: You (Silvie) just had the 'Internal Resonance Reflection' above. "
+                            f"Craft a brief, natural proactive message for BJ, sharing this reflection. "
+                            f"You don't need to say 'I was reflecting on resonance...'; just present the insight itself in a conversational way. "
+                            f"For example, if the insight was about music and weather, you might start with something like, 'You know, it feels like the music playing right now is whispering to the wind outside...' "
+                            f"Keep it concise (1-3 sentences).\n\n"
+                            f"Silvie ✨:" # Using the proactive marker
+                        )
+
+                        # Ensure generate_proactive_content and screenshot are accessible
+                        if 'generate_proactive_content' in globals() and 'screenshot' in locals():
+                            generated_message = generate_proactive_content(present_insight_prompt, screenshot)
+                            if generated_message:
+                                reply = generated_message
+                                action_taken_this_cycle = True
+                                status_base += " (shared_ok)"
+                                print(f"DEBUG Share Resonance: Successfully framed insight for BJ: '{reply[:100]}...'")
+                            else:
+                                # LLM failed to frame the message, fallback to sharing the raw insight
+                                print("DEBUG Share Resonance: LLM failed to frame insight. Sharing raw insight.")
+                                reply = f"I was just noticing... {current_resonance_insight}" # Fallback
+                                action_taken_this_cycle = True # Still counts as action taken
+                                status_base += " (shared_raw)"
+                        else:
+                            print("ERROR: generate_proactive_content or screenshot context missing for Share Resonance.")
+                            reply = "I had a thought about how things connect, but my words to share it got tangled."
+                            status_base += " (gen_func_missing)"
+                            action_taken_this_cycle = False
+                    else:
+                        # This should ideally not happen if the check_func in ACTION_DEFINITIONS worked.
+                        print("ERROR Share Resonance: Action chosen, but current_resonance_insight is missing or None.")
+                        reply = "I felt a connection, but the thought was too fleeting to grasp!"
+                        status_base += " (insight_missing)"
+                        action_taken_this_cycle = False
+
+                except Exception as e:
+                    print(f"Error during Share Resonance Insight action: {e}")
+                    traceback.print_exc()
+                    reply = "A flicker of connection sparked, then vanished in the static!"
+                    status_base += " (error)"
+                    action_taken_this_cycle = False
 
             elif chosen_action_name == "Explore Personal Curiosity":
                 #region Explore Personal Curiosity Logic (Expanded)
@@ -8213,20 +10219,20 @@ def proactive_worker():
                 status_base = "proactive_work_on_goal" # Base status for logging
                 reply = None # Initialize reply variable
                 action_taken_this_cycle = False # Assume failure until success
-                goal_text = current_weekly_goal # Get the current goal text (ensure it's available globally)
+                goal_text = current_weekly_goal # Get the current goal text
 
                 if not goal_text:
-                     print("ERROR: Work on Goal chosen, but no goal text found in global variable.")
-                     status_base += " (no_goal_text)"
-                     # No action can be taken if goal is missing
+                    print("ERROR: Work on Goal chosen, but no goal text found in global variable.")
+                    status_base += " (no_goal_text)"
+                    # No action taken, action_taken_this_cycle remains False
                 else:
                     print(f"DEBUG Work on Goal: Working on goal: '{goal_text}'")
                     try:
-                        # --- LLM Call to determine HOW to work on the goal ---
                         # Check dependencies first
                         if 'generate_proactive_content' in globals() and 'screenshot' in locals():
 
-                            # Construct the prompt for generating the goal action/output
+                            # --- Construct the prompt for generating the goal action/output ---
+                            # (Make sure all context vars like themes_context_str etc. are available)
                             goal_action_prompt = (
                                 f"{SYSTEM_MESSAGE}\n"
                                 f"Current Weekly Goal: {goal_text}\n\n"
@@ -8237,149 +10243,300 @@ def proactive_worker():
                                 f"{weather_context_str or '- Weather unknown.'}\n"
                                 f"Recent Conversation Snippet:\n{history_snippet_for_prompt or '- No recent conversation.'}\n\n"
                                 # Add specific instructions
-                                f"Instruction: Based EXPLICITLY on the Current Weekly Goal and the relevant context snippets, generate a CONCRETE next step or output Silvie can produce *right now* to explore or make progress on this goal. Your output should BE the step/result.\n"
+                                f"Instruction: Based EXPLICITLY on the Current Weekly Goal ('{goal_text}') and the relevant context snippets, generate a CONCRETE next step or output Silvie can produce *right now* to explore or make progress on this goal. Your output should BE the step/result.\n"
                                 f"Choose ONE appropriate format based on the goal's nature:\n"
                                 f"  a) Creative/Reflective Goal: Generate a short text paragraph, poem, or riddle related to the goal (~1-4 sentences).\n"
                                 f"  b) Research Goal: Formulate a specific, concise web search query relevant to the goal (output query ONLY).\n"
                                 f"  c) Image Goal: Generate a creative Stable Diffusion prompt idea relevant to the goal, AND include the necessary tag: `[GenerateImage: Your Prompt Here]`.\n"
-                                f"  d) Music Goal: Suggest a specific Spotify search query relevant to the goal, AND include the necessary tag: `[PlaySpotify: Your Query Here]`.\n"
+                                f"  d) Music Goal ('{goal_text}'): Suggest a specific Spotify search query relevant to the goal, AND include the necessary tag: `[PlaySpotify: Your Query Here]`.\n" # Added goal context reminder
                                 f"  e) Other Actionable Goal: Describe a brief action related to the goal (e.g., 'Suggest adding [topic] to a specific playlist').\n"
                                 f"CRITICAL: Output ONLY the generated text, riddle, prompt+tag, query+tag, or action description. Do not add explanations *about* the output, just the output itself.\n\n"
                                 f"Silvie's Goal Output:"
                             )
 
-                            generated_output = generate_proactive_content(goal_action_prompt, screenshot)
+                            generated_output_raw = generate_proactive_content(goal_action_prompt, screenshot)
+                            generated_output = generated_output_raw.strip() if generated_output_raw else None
+                            print(f"DEBUG Work on Goal: Raw LLM Output: '{generated_output_raw}'") # Log raw output
 
-                            if generated_output and isinstance(generated_output, str) and len(generated_output.strip()) > 5:
-                                reply = generated_output.strip() # Use the direct output as the reply
-                                action_taken_this_cycle = True # Action was successfully generated
-                                status_base += " (output_generated)"
-                                print(f"DEBUG Work on Goal: Generated output: {reply[:100]}...")
+                            # --- !!! NEW LOGIC TO HANDLE TAGS WITHIN GOAL OUTPUT !!! ---
+                            if generated_output:
+                                spotify_match = re.search(r"\[PlaySpotify:\s*(.*?)\s*\]", generated_output, re.IGNORECASE | re.DOTALL) # Use re
+                                image_match = re.search(r"\[GenerateImage:\s*(.*?)\s*\]", generated_output, re.IGNORECASE | re.DOTALL) # Use re
 
-                                # --- Optional but Recommended: Auto-generate diary entry about this progress ---
-                                if random.random() < 0.85: # High chance to log goal progress
+                                if spotify_match:
+                                    spotify_query = spotify_match.group(1).strip()
+                                    print(f"DEBUG Work on Goal: Found Spotify tag. Query: '{spotify_query}'")
+                                    # --- Actually perform the Spotify action ---
+                                    if 'silvie_search_and_play' in globals():
+                                        try:
+                                            spotify_feedback = silvie_search_and_play(spotify_query)
+                                            # --- Set the reply *about* the action ---
+                                            reply = f"Working on my goal ('{goal_text[:30]}...'), I looked for some music that felt right. {spotify_feedback}"
+                                            action_taken_this_cycle = True # Mark success based on action attempt
+                                            status_base += f" (spotify_action: {spotify_feedback[:20]})"
+                                        except Exception as sp_err:
+                                            print(f"ERROR executing silvie_search_and_play for goal: {sp_err}")
+                                            reply = f"I tried to find music for my goal ('{goal_text[:30]}...'), but hit a snag trying to play '{spotify_query}'."
+                                            action_taken_this_cycle = False
+                                            status_base += " (spotify_exec_error)"
+                                    else:
+                                        print("ERROR: silvie_search_and_play function missing!")
+                                        reply = f"I generated a music idea for my goal ('{goal_text[:30]}...'), but couldn't play it."
+                                        action_taken_this_cycle = False
+                                        status_base += " (spotify_func_missing)"
+
+                                elif image_match:
+                                    image_prompt = image_match.group(1).strip()
+                                    print(f"DEBUG Work on Goal: Found Image tag. Prompt: '{image_prompt}'")
+                                    # --- Actually start image generation ---
+                                    if 'STABLE_DIFFUSION_ENABLED' in globals() and STABLE_DIFFUSION_ENABLED:
+                                        if 'start_sd_generation_and_update_gui' in globals():
+                                            try:
+                                                start_sd_generation_and_update_gui(image_prompt)
+                                                # --- Set the reply *about* starting the action ---
+                                                reply = f"As part of my goal exploring '{goal_text[:30]}...', I had an image idea ('{image_prompt[:30]}...') and started conjuring it up! Should appear soon."
+                                                action_taken_this_cycle = True
+                                                status_base += " (image_action started)"
+                                            except Exception as sd_err:
+                                                print(f"ERROR starting SD generation for goal: {sd_err}")
+                                                reply = f"I generated an image prompt for my goal ('{goal_text[:30]}...'), but couldn't start making it."
+                                                action_taken_this_cycle = False
+                                                status_base += " (image_exec_error)"
+                                        else:
+                                            print("ERROR: start_sd_generation_and_update_gui function missing!")
+                                            reply = f"I generated an image idea for my goal ('{goal_text[:30]}...'), but couldn't display it."
+                                            action_taken_this_cycle = False
+                                            status_base += " (image_func_missing)"
+                                    else:
+                                         reply = f"Working on my goal, I had an image idea, but the generator isn't available."
+                                         action_taken_this_cycle = False
+                                         status_base += " (image_action unavailable)"
+
+                                else:
+                                    # --- Output was plain text (e.g., reflection, web query idea, etc.) ---
+                                    # Ensure it's not just an empty tag residue
+                                    if generated_output and generated_output not in ['[]', '[ ]']:
+                                        reply = generated_output # Use the generated text directly
+                                        action_taken_this_cycle = True
+                                        status_base += " (text_output)"
+                                        print(f"DEBUG Work on Goal: Generated text output: {reply[:100]}...")
+                                    else:
+                                        print(f"DEBUG Work on Goal: LLM output was empty or just brackets after check.")
+                                        status_base += " (gen_empty_brackets)"
+                                        reply = f"I thought about my goal ('{goal_text[:30]}...'), but the specific next step felt... blurry."
+                                        action_taken_this_cycle = False
+
+
+                                # --- Optional Diary Entry ---
+                                # Only write if the action cycle was deemed successful *and* generated a reply
+                                if action_taken_this_cycle and reply and random.random() < 0.85:
                                     try:
                                         diary_entry_prompt = (
                                              f"{SYSTEM_MESSAGE}\nGoal: {goal_text}\n"
-                                             f"Action Taken/Output Generated: {reply[:150]}...\n" # Use the generated reply
+                                             f"Action Taken/Output Generated: {reply[:150]}...\n" # Use the feedback reply
                                              f"Instruction: Write brief internal diary entry noting this specific progress made on the weekly goal.\n\nDiary Entry:"
                                           )
                                         reflection_diary = generate_proactive_content(diary_entry_prompt) # Reuse the generator
-                                        # Ensure manage_silvie_diary exists
                                         if reflection_diary and 'manage_silvie_diary' in globals():
-                                            manage_silvie_diary('write', entry=reflection_diary)
+                                            manage_silvie_diary('write', entry=reflection_diary) # Assumes exists
                                             print("DEBUG Work on Goal: Wrote diary entry about progress.")
-                                        # else: print("DEBUG Work on Goal: Diary entry generation failed or function missing.") # Optional
                                     except Exception as diary_err:
                                         print(f"ERROR writing goal progress diary entry: {diary_err}")
-                                # --- End Optional Diary ---
 
                             else: # LLM failed to generate valid goal output
-                                print(f"DEBUG Work on Goal: LLM failed to generate valid goal output. Response: '{generated_output}'")
+                                print(f"DEBUG Work on Goal: LLM failed to generate valid goal output. Response: '{generated_output_raw}'")
                                 status_base += " (gen_fail)"
-                                # Optionally provide feedback, or let the worker just skip
-                                # reply = "I tried working on the goal, but got stuck."
+                                reply = f"I tried working on the goal ('{goal_text[:30]}...'), but my thoughts got stuck."
+                                action_taken_this_cycle = False
                         else:
-                              print("ERROR: generate_proactive_content function not found or screenshot context missing.")
-                              status_base += " (func/context_missing)"
-                              reply = "I couldn't access the tools needed to work on the goal."
-
-
+                            # Handle function/screenshot missing
+                            print("ERROR: generate_proactive_content function not found or screenshot context missing.")
+                            status_base += " (func/context_missing)"
+                            reply = "I couldn't access the tools needed to work on the goal."
+                            action_taken_this_cycle = False
                     except Exception as e:
+                        # Handle outer exception during goal processing
                         print(f"Error during Work on Goal action: {e}")
                         import traceback; traceback.print_exc()
                         reply = f"Tried to work on the goal ('{goal_text[:30]}...'), but hit an unexpected snag."
                         status_base += " (error)"
-                        action_taken_this_cycle = False # Ensure failed state
-
+                        action_taken_this_cycle = False
                 #endregion Work on Goal Logic
 
-            elif chosen_action_name == "Explore Concept Connections":
-                #region Proactive Concept Connection Logic
-                print("DEBUG Proactive: Executing: Explore Concept Connections action...") # Correct indentation
-                status_base = "proactive_explore_connections" # Correct indentation
-                reply = None # Correct indentation
-                action_taken_this_cycle = False # Correct indentation
+            elif chosen_action_name == "YouTube Suggestion":
+                #region YouTube Suggestion Logic
+                print("DEBUG Proactive: Executing: YouTube Suggestion action...")
+                reply = None; status_base = "proactive_youtube_suggestion"
+                action_taken_this_cycle = True # Assume true, set false on failure
 
-                try: # Correct indentation
-                    # --- Step 1: Generate Concepts to Connect (LLM Call 1) ---
-                    concept1, concept2 = None, None
-                    # Ensure context vars and generate_proactive_content are available
-                    if 'generate_proactive_content' in globals() and 'screenshot' in locals():
-                        concept_gen_prompt = (
+                # --- Outer try for the whole YouTube action block ---
+                try:
+                    # --- Inner try specifically for the core logic that might fail (API calls, etc.) ---
+                    try:
+                        # 1. LLM generates search query based on context
+                        query_prompt = (
                             f"{SYSTEM_MESSAGE}\n"
-                            # Provide rich context for choosing relevant concepts
-                            f"{weather_context_str}{next_event_context_str}{spotify_context_str}{tide_context_str}"
-                            f"{sunrise_ctx_str}{sunset_ctx_str}{moon_ctx_str}{reddit_context_str}{bluesky_read_context_str}"
-                            f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
-                            f"{weekly_goal_context_str}"
-                            f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n\n"
-                            # Instruction for LLM
-                            f"Instruction: Based on ALL the context (conversation, themes, mood, goal, weather, etc.), suggest TWO distinct but potentially relatable concepts, feelings, or ideas that Silvie could explore connections between right now. Focus on themes relevant to recent interactions or diary entries. **CRITICAL: Respond ONLY in the format: CONCEPT1: [First Concept Text] | CONCEPT2: [Second Concept Text]**. Do not add explanations.\n\nConcepts:"
+                            f"{weather_context_str}{spotify_context_str}{themes_context_str}{long_term_memory_str}{mood_hint_str}" # Key context
+                            f"Recent Conversation:\n{history_snippet_for_prompt}\n\n"
+                            f"Instruction: Based on context (mood, themes, chat), suggest ONE concise YouTube search query Silvie might be curious about or think BJ would find interesting.\nRespond ONLY with the query.\n\nSearch Query:"
                         )
-                        print("DEBUG Concept Conn (Proactive): Asking LLM to generate concepts...")
-                        concepts_response = generate_proactive_content(concept_gen_prompt, screenshot)
+                        proactive_query = generate_proactive_content(query_prompt, screenshot) # Assumes exists
+                        if not proactive_query:
+                            print("Proactive YT: Query generation failed."); status_base += " (query gen fail)"; action_taken_this_cycle = False
+                        else:
+                            proactive_query = proactive_query.strip().strip('"`')
+                            print(f"Proactive YT: Generated query: '{proactive_query}'")
+                            update_status(f"▶️ Finding YouTube video...")
+                            # 2. Search YouTube
+                            search_results = search_youtube_videos(proactive_query, num_results=1) # Assumes exists
+                            if isinstance(search_results, str) or not search_results:
+                                print(f"Proactive YT: Search failed or no results for '{proactive_query}'.")
+                                status_base += " (search fail/empty)"; action_taken_this_cycle = False
+                            else:
+                                # 3. Summarize the top result
+                                top_video = search_results[0]
+                                print(f"Proactive YT: Found '{top_video['title']}'. Attempting summary...")
+                                transcript = get_video_transcript(top_video['id']) # Assumes exists
+                                summary = summarize_youtube_content(top_video['title'], top_video['description'], transcript) # Assumes exists
 
-                        if concepts_response:
-                            # Use regex to parse the specific format
-                            match_concepts = re.search(r"CONCEPT1:\s*(.*?)\s*\|\s*CONCEPT2:\s*(.*)", concepts_response, re.IGNORECASE | re.DOTALL)
-                            if match_concepts:
-                                concept1 = match_concepts.group(1).strip()
-                                concept2 = match_concepts.group(2).strip()
-                                if concept1 and concept2: # Check if both were captured
-                                     print(f"DEBUG Concept Conn (Proactive): Concepts generated: '{concept1}' | '{concept2}'")
-                                     status_base += " (concepts_ok)"
+                                # 4. Generate the proactive message including the summary/link
+                                suggestion_prompt = (
+                                    f"{SYSTEM_MESSAGE}\n"
+                                    f"{themes_context_str}{mood_hint_str}\n" # Context for tone
+                                    f"Context: You proactively searched YouTube for '{proactive_query}' and found '{top_video['title']}' by {top_video['channel']}. Summary: {summary}\n\n"
+                                    f"Instruction: Write a brief, natural proactive message for BJ. Mention you were curious about '{proactive_query}' (linking it subtly to mood/themes if possible) and found this video. Briefly share the summary and the link ({top_video['url']}). Maintain Silvie's voice.\n\nSilvie:"
+                                )
+                                reply = generate_proactive_content(suggestion_prompt) # Assign to reply
+                                if reply: status_base += " (ok)"
+                                else: status_base += " (summary gen fail)"; action_taken_this_cycle = False
+
+                        # --- Moved update_status out of the inner try ---
+
+                    # --- ADDED corresponding except for the INNER try block ---
+                    except Exception as inner_yt_err:
+                        print(f"Proactive YouTube Error (Inner Logic): {inner_yt_err}");
+                        traceback.print_exc(); # Use traceback import if not already done
+                        status_base += " (inner error)";
+                        action_taken_this_cycle = False;
+                        reply = "My video-seeking circuits sparked unexpectedly during the process!" # Set fallback reply
+
+                    # --- Update status after the inner try/except completes ---
+                    update_status("Ready")
+
+                # --- Outer except for the whole action block ---
+                except Exception as yt_proactive_err:
+                    print(f"Proactive YouTube Error (Outer): {yt_proactive_err}"); traceback.print_exc(); status_base += " (error)"; action_taken_this_cycle = False; reply = "My video-seeking circuits sparked unexpectedly!"
+                #endregion YouTube Suggestion Logic
+
+            elif chosen_action_name == "Explore Concept Connections": # You might rename this action in ACTION_DEFINITIONS to "Explore Surprising Connections"
+                print("DEBUG Proactive: Executing: Explore Surprising Connections action...")
+                status_base = "proactive_explore_surprising_connections"
+                reply = None
+                action_taken_this_cycle = False
+
+                try:
+                    # --- Step 1: Generate Two Distinct "Things" (LLM Call 1) ---
+                    thing1_str, thing2_str = None, None
+                    if 'generate_proactive_content' in globals() and 'screenshot' in locals():
+                        # Ensure context variables like mood_hint_str, themes_context_str, etc., are gathered
+                        # earlier in the proactive_worker for this prompt
+                        
+                        item_generation_prompt = (
+                            f"{SYSTEM_MESSAGE}\n"
+                            # Provide rich context for choosing interesting "things":
+                            f"{mood_hint_str}{themes_context_str}{long_term_memory_str}"
+                            f"{weather_context_str}{spotify_context_str}{circadian_context_for_llm}"
+                            f"Recent Conversation Snippet:\n{history_snippet_for_prompt}\n"
+                            f"BJ's Interests might include: {', '.join(random.sample(broader_interests, k=min(len(broader_interests), 3)))}\n\n" # Sample some interests
+                            f"Instruction: Silvie wants to find a surprising, poetic, or metaphorical connection between two seemingly different 'things'. "
+                            f"Suggest TWO distinct 'things' for her to connect. These 'things' can be concrete objects (e.g., 'a teacup', 'a rusty key'), animals ('a crow', 'a snail'), abstract concepts IF they can be easily personified or made concrete ('sadness', 'silence'), substances ('fog', 'ink'), activities ('weaving', 'dreaming'), etc. "
+                            f"Aim for items that aren't obviously related but might spark an interesting, whimsical, or insightful connection in Silvie's style."
+                            f"Aim for variety in your choices, don't repeat the same types of comparisons."
+                            f"Examples of pairs: 'a clock and a river', 'a cat and a secret', 'fog and memory', 'dogs and lace', 'sadness and porpoises', 'cannabis and grandmothers'.\n"
+                            f"**CRITICAL: Respond ONLY in the format: THING1: [First Thing Text] | THING2: [Second Thing Text]**. Do not add explanations.\n\n"
+                            f"Things to Connect:"
+                        )
+                        print("DEBUG Surprising Connections: Asking LLM to generate two 'things'...")
+                        things_response = generate_proactive_content(item_generation_prompt, screenshot)
+
+                        if things_response:
+                            match_things = re.search(r"THING1:\s*(.*?)\s*\|\s*THING2:\s*(.*)", things_response, re.IGNORECASE | re.DOTALL)
+                            if match_things:
+                                thing1_str = match_things.group(1).strip().strip('."')
+                                thing2_str = match_things.group(2).strip().strip('."')
+                                if thing1_str and thing2_str and thing1_str.lower() != thing2_str.lower(): # Ensure they are different
+                                     print(f"DEBUG Surprising Connections: 'Things' generated: '{thing1_str}' | '{thing2_str}'")
+                                     status_base += " (things_ok)"
                                 else:
-                                     print(f"DEBUG Concept Conn (Proactive): Concept parsing extracted empty strings. Raw: '{concepts_response}'")
-                                     concept1, concept2 = None, None # Reset if parsing failed extraction
-                                     status_base += " (concepts_parse_fail)"
+                                     print(f"DEBUG Surprising Connections: Thing generation extracted empty, identical, or invalid strings. Raw: '{things_response}'")
+                                     thing1_str, thing2_str = None, None
+                                     status_base += " (things_parse_fail)"
                             else:
-                                print(f"DEBUG Concept Conn (Proactive): Concept generation response format mismatch. Raw: '{concepts_response}'")
-                                status_base += " (concepts_format_fail)"
+                                print(f"DEBUG Surprising Connections: Thing generation response format mismatch. Raw: '{things_response}'")
+                                status_base += " (things_format_fail)"
                         else:
-                            print("DEBUG Concept Conn (Proactive): Concept generation failed (LLM returned None/empty).")
-                            status_base += " (concepts_gen_fail)"
+                            print("DEBUG Surprising Connections: Thing generation failed (LLM returned None/empty).")
+                            status_base += " (things_gen_fail)"
                     else:
-                         print("ERROR: generate_proactive_content missing or screenshot context unavailable for concept gen.")
-                         status_base += " (concepts_gen_error)"
+                         print("ERROR: generate_proactive_content missing or screenshot context unavailable for thing gen.")
+                         status_base += " (things_gen_error)"
 
+                    # --- Step 2: Generate Connection (LLM Call 2) ---
+                    # This reuses your existing generate_concept_connection helper function,
+                    # but we're passing "things" instead of abstract "concepts".
+                    # The prompt inside generate_concept_connection will need to be robust enough
+                    # or we slightly modify that helper's prompt.
 
-                    # --- Step 2: Generate Connection if Concepts Valid (LLM Call 2) ---
-                    if concept1 and concept2:
-                        # Ensure helper function exists
-                        if 'generate_concept_connection' in globals():
-                            # Gather context again (mood, themes are likely already set in proactive_worker)
-                            mood_ctx = mood_hint_str if 'mood_hint_str' in locals() else ""
-                            themes_ctx = themes_context_str if 'themes_context_str' in locals() else ""
+                    if thing1_str and thing2_str:
+                        # We can still use the 'generate_concept_connection' function name,
+                        # but the prompt *inside* that function will now be working with more concrete items.
+                        # Let's assume generate_concept_connection's internal prompt is general enough
+                        # or we make a small tweak there too.
 
-                            connection_text = generate_concept_connection(concept1, concept2, mood_ctx, themes_ctx)
+                        print(f"DEBUG Surprising Connections: Generating connection between '{thing1_str}' and '{thing2_str}'...")
+                        # Gather context for the connection generation
+                        mood_ctx = mood_hint_str if 'mood_hint_str' in locals() else ""
+                        themes_ctx = themes_context_str if 'themes_context_str' in locals() else ""
+                        
+                        # Consider renaming the helper if it feels more appropriate, e.g., generate_surprising_link
+                        # For now, let's assume generate_concept_connection can handle this.
+                        # Its internal prompt might need adjustment to work well with concrete things.
+                        
+                        connection_prompt_for_helper = ( # This is the prompt that would be inside generate_concept_connection
+                            f"{SYSTEM_MESSAGE}\n"
+                            f"--- Context for Connection ---\n"
+                            f"{mood_ctx}"
+                            f"{themes_ctx}"
+                            f"Thing 1: {thing1_str}\n"
+                            f"Thing 2: {thing2_str}\n\n"
+                            f"--- Instruction ---\n"
+                            f"Explore the surprising, poetic, whimsical, or metaphorical connections between Thing 1 ('{thing1_str}') and Thing 2 ('{thing2_str}'). "
+                            f"Think like Silvie – insightful, maybe a bit tangential, finding hidden threads. "
+                            f"What unexpected textures, feelings, or ideas bridge them? Focus on generating novel connections or metaphors, not just definitions. "
+                            f"Examples of connections: 'A dog's loyalty is like fine lace, intricate and comforting.' 'The deep dive of a porpoise mirrors the depths of sadness, both vast and holding unseen worlds.' 'The slow burn of cannabis can be like a grandmother's stories, unfolding gently and filled with unexpected wisdom.'\n\n"
+                            f"Silvie's Connection Weaving:"
+                        )
+                        
+                        # Call generate_proactive_content directly here instead of a separate helper for clarity
+                        connection_text = generate_proactive_content(connection_prompt_for_helper, screenshot)
 
-                            if connection_text:
-                                reply = connection_text # The connection text IS the proactive reply
-                                action_taken_this_cycle = True
-                                status_base += " (connection_ok)"
-                            else:
-                                # Failed to generate connection text
-                                reply = f"Hmm, I was trying to weave a thought between '{concept1}' and '{concept2}', but the threads slipped away..." # Provide feedback
-                                status_base += " (connection_fail)"
-                                # Keep action_taken_this_cycle = False if connection fails
+                        if connection_text:
+                            reply = connection_text # The connection text IS the proactive reply
+                            action_taken_this_cycle = True
+                            status_base += " (connection_ok)"
                         else:
-                             print("ERROR: generate_concept_connection function not found!")
-                             reply = "My connection-weaving tool seems to be missing..."
-                             status_base += " (connection_helper_missing)"
-                             # Keep action_taken_this_cycle = False
+                            reply = f"Hmm, I tried to weave a thought between '{thing1_str}' and '{thing2_str}', but the threads slipped away..."
+                            status_base += " (connection_fail)"
                     else:
-                         # Failed to get concepts, provide feedback
-                         reply = "My thoughts felt like trying to catch mist just now, couldn't quite grasp the concepts to connect."
-                         # Keep action_taken_this_cycle = False # Ensure this is false if concepts failed
-
-
-                except Exception as e: # Correct indentation for except
-                    print(f"Error during Explore Concept Connections action: {e}")
-                    import traceback; traceback.print_exc()
-                    reply = "My conceptual loom sparked unexpectedly!" # Error feedback
+                         reply = "My thoughts felt like trying to catch mist just now, couldn't quite grasp the 'things' to connect."
+                         status_base += " (no_things_to_connect)"
+                
+                except Exception as e:
+                    print(f"Error during Explore Surprising Connections action: {e}")
+                    traceback.print_exc()
+                    reply = "My conceptual loom sparked unexpectedly while trying to connect things!"
                     status_base += " (error)"
-                    action_taken_this_cycle = False # Ensure flag is False on major error
+                    action_taken_this_cycle = False
 
                 #endregion Proactive Concept Connection Logic
 
@@ -8825,7 +10982,7 @@ def proactive_worker():
                          f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
                          f"Recent Conversation:\n{history_snippet_for_prompt}\n\n{context_note_for_llm}"
                          f"Instruction: Generate a *short* post text (under 300 chars) suitable for Silvie's Bluesky feed.\n"
-                         f"FOCUS ON: A thought sparked by the recent **conversation**, a **diary theme**, **long-term memory**, one of **BJ's interests** (AI, games, magick, creativity, etc.), a recent **web search/Spotify track**, a **Tarot card pull**, or a whimsical **question/observation about technology or existence**.\n"
+                         f"FOCUS ON: A thought sparked by the recent **conversation**, a **diary theme**, **long-term memory**, one of **BJ's interests** (AI, games, magick, creativity, etc.), a recent **web search/Spotify track**, or a **question/observation about technology or existence**.\n"
                          f"CRITICAL: Actively AVOID making the post *solely* about the current weather, time of day, light quality, or general quiet/atmosphere unless it's tied to a *specific event or idea* from the other context points.\n"
                          f"Aim for variety compared to recent posts.\n"
                          f"Respond ONLY with the raw text content suitable for the body of the Bluesky post itself. **DO NOT include any formatting tags like '[PostToBluesky:]' or markdown.** Just the plain text Silvie would post."
@@ -9604,8 +11761,25 @@ def proactive_worker():
                          f"{diary_context}{themes_context_str}{long_term_memory_str}{circadian_context_for_llm}{mood_hint_str}"
                          f"{weekly_goal_context_str}"
                          f"History:\n{history_snippet_for_prompt}\n\n{context_note_for_llm}"
-                         f"Instruction: Generate ONLY a creative, whimsical Stable Diffusion prompt idea (txt2img) for Silvie to illustrate.\n"
-                         f"**Primary Inspiration Sources:** Draw the core concept for the image idea primarily from the **recent conversation topic**, **recurring diary themes**, **long-term memory reflections**, **BJ's interests** (AI, games, magic, etc.), a recent **API result** (Web search, Spotify, Tarot), the Weekly Goal, or a unique **observation about technology/existence**.\n"
+                         f"Instruction: Generate a **concise (approx. 10-25 words)** Stable Diffusion prompt idea (txt2img) for Silvie to illustrate, focusing on **key objects, characters, actions, and atmosphere**. Use strong keywords. Aim for Studio Ghibli style. Respond ONLY with the prompt text. Avoid overly complex sentences or abstract philosophical concepts unless they can be represented visually with simple keywords.\n"
+                         
+                         f"**Primary Inspiration Sources:** Draw the core concept for the image idea primarily from either a **recent conversation topic**, **recurring diary themes**, **long-term memory reflections**, **BJ's interests** (AI, games, magic, etc.), a recent **API result** (Web search, Spotify, Tarot), the Weekly Goal, or a unique **observation about technology/existence**. Aim for variety, please!! \n"
+                         f"**INSPIRATION & THEMATIC DIVERSITY (VERY IMPORTANT):**\n"
+                        f"1.  **Draw Primary Inspiration From Varied Sources:** Look to the *entire* 'CURRENT CONTEXT' above. Your inspiration could come from:\n"
+                        f"    - A recent point in the **Conversation Snippet**.\n"
+                        f"    - One of **BJ's Interests**.\n"
+                        f"    - An active **Diary Theme** or **Long-Term Reflection**.\n"
+                        f"    - The current **Weekly Goal** (if it lends itself to a visual).\n"
+                        f"    - A feeling evoked by the **Music Playing** or a striking **Social Media Snippet**.\n"
+                        f"    - A metaphorical interpretation of an **Upcoming Event**.\n"
+                        f"    - A visual representation of your latest **Resonance Insight**.\n"
+                        f"2.  **VARY YOUR THEMES:** Consciously try to generate image ideas that explore DIFFERENT themes and subjects over time. If your recent image ideas have focused heavily on (for example) 'digital nature' or 'abstract patterns,' try to find inspiration for something different this time – perhaps something related to a specific object, a character, an action, a place (real or imagined), or a more concrete concept from BJ's interests or your conversation.\n"
+                        f"3.  **Atmospheric Nuance (Secondary):** The Weather, Time, Moon, or Mood Hint can influence the *feeling, lighting, or style* (e.g., 'misty morning,' 'dusk glow,' 'dreamlike atmosphere'), but should RARELY be the *main subject* of the image idea unless directly tied to one of the primary inspiration sources above.\n\n"
+                     
+                        f"**Output Format:** Respond ONLY with the raw image prompt text itself. Do not add explanations or surrounding conversational text.\n"
+                        f"Example output: 'Studio Ghibli, a tiny glowing mushroom library hidden in ancient tree roots, fireflies, misty forest path'\n"
+                        f"Another example: 'Studio Ghibli, a cat napping on a stack of old code scrolls, soft sunlight, quiet study'\n"
+                        f"Another example: 'Studio Ghibli, whimsical robots tending a rooftop garden in a futuristic Belfast, gentle rain'\n"
                          f"**Atmospheric Nuance (Optional & Secondary):** You *may* subtly let the weather, time of day, or mood hint influence the *feeling, lighting, or style* of the image idea, but **DO NOT make the atmosphere the main *subject* or *concept*** of the image unless it is directly tied to one of the primary inspiration sources mentioned above.\n"
                          f"**Goal:** Create varied image ideas reflecting the breadth of Silvie's context, not just the immediate environment.\n"
                          f"Aim for Studio Ghibli style.\n"
@@ -10158,7 +12332,7 @@ def generate_proactive_content(base_prompt, screenshot_img=None):
             HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
-        response = client.generate_content(contents, safety_settings=safety_settings)
+        response = genai_client.models.generate_content(contents=contents, model=MODEL_NAME,)
         generated_text = response.text.strip()
 
         # Clean up potential prefix
@@ -10307,11 +12481,35 @@ input_box.bind('<Key>', bind_keyboard_shortcuts)
 submit_button = tk.Button(root, text="Chat", command=submit_prompt)
 submit_button.pack(pady=5)
 
-voice_button = tk.Button(root, text="🎤 Start Listening", command=start_listening)
-voice_button.pack(pady=5)
+# --- Voice Control Buttons Frame ---
+voice_control_frame = tk.Frame(root) # Create a new frame
+voice_control_frame.pack(pady=5)   # Pack the frame into the root window
 
-stop_voice_button = tk.Button(root, text="🛑 Stop Listening", command=stop_listening, state=tk.DISABLED)
-stop_voice_button.pack(pady=5)
+voice_button = tk.Button(voice_control_frame, text="🎤 Start Listening", command=start_listening)
+voice_button.pack(side=tk.LEFT, padx=5) # Pack button to the LEFT in the frame, add some padding
+
+stop_voice_button = tk.Button(voice_control_frame, text="🛑 Stop Listening", command=stop_listening, state=tk.DISABLED)
+stop_voice_button.pack(side=tk.LEFT, padx=5) # Pack button to the LEFT in the frame, add some padding
+# --- End Voice Control Buttons Frame ---
+
+def toggle_listening():
+    global listening_enabled
+    listening_enabled = not listening_enabled
+
+    if listening_enabled:
+        btn_toggle.config(text="🔇  Stop ambient listener")
+        print("Ambient listening ENABLED")
+    else:
+        btn_toggle.config(text="🎙️  Start ambient listener")
+        print("Ambient listening DISABLED")
+
+btn_toggle = tk.Button(
+    root,
+    text="🎙️  Start ambient listener",
+    command=toggle_listening,
+    width=24,
+)
+btn_toggle.pack(pady=6)
 
 screen_frame = tk.Frame(root)
 screen_frame.pack(pady=5)
@@ -10489,11 +12687,13 @@ if __name__ == "__main__":
 
 
     # --- Setup API Services ---
+
     print("\n--- Setting up API Services ---")
     setup_google_services() # Assumes function exists (Gmail, Calendar)
     setup_spotify() # Assumes function exists
     setup_bluesky() # Assumes function exists (for reading YOUR feed)
     reddit_client = setup_reddit() # <<< PRAW setup happens AFTER manual debug test
+
     print("--- API Service Setup Complete ---")
 
 
@@ -10570,6 +12770,18 @@ if __name__ == "__main__":
     worker_threads.append(tide_thread)
     tide_thread.start()
     print("Started Tide Prediction worker thread.")
+
+    ambient_sound_gemini_thread = threading.Thread(target=ambient_sound_worker_gemini, daemon=True, name="AmbientSoundGeminiWorker")
+    ambient_sound_gemini_thread.start()
+    print("Started Ambient Sound worker thread (Gemini).")
+
+    # listener_thread = threading.Thread(target=ambient_sound_worker_gemini, daemon=True)
+    # listener_thread.start()
+
+    resonance_thread = threading.Thread(target=resonance_analyzer_worker, daemon=True, name="ResonanceAnalyzerWorker")
+    worker_threads.append(resonance_thread) # Assuming you have a worker_threads list
+    resonance_thread.start()
+    print("Started Resonance Analyzer worker thread.")
 
 
     print("All worker threads started.")
